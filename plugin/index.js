@@ -533,11 +533,31 @@ function applyInner(ctx, config) {
           return sendJson(res, 503, { ok: false, error: 'agents 服务还没就绪' })
         }
         try {
-          const agent = agents.get(sessionId)
+          // ★ 先找活的；找不到就**从磁盘恢复**（2026-10-17 真机踩到）
+          //
+          // DSH 重启后只有「当前打开的会话」是活 agent，其余都在磁盘上。
+          // `agents.get()` 只查内存 ⇒ 直接 404。而 `agents.resume()`
+          // 能按 `resumeSessionId` 把持久化会话拉回来。
+          let agent = agents.get(sessionId)
+          let resumed = false
+          if (!agent) {
+            try {
+              agent = await agents.resume({ resumeSessionId: sessionId })
+              resumed = Boolean(agent)
+              logger.info?.(
+                `bili-companion: 会话 ${sessionId.slice(-8)} 已从磁盘恢复 (${resumed})`,
+              )
+            } catch (error) {
+              return sendJson(res, 500, {
+                ok: false,
+                error: `恢复会话失败：${String(error?.message ?? error)}`,
+              })
+            }
+          }
           if (!agent) {
             return sendJson(res, 404, {
               ok: false,
-              error: `找不到会话 ${sessionId}（是不是关了？）`,
+              error: `找不到会话 ${sessionId}（可能被删了）`,
             })
           }
           // ★★★ 必须带 role（2026-10-17 真机踩到）
@@ -558,7 +578,7 @@ function applyInner(ctx, config) {
             source: { kind: 'user' },
           })
           logger.info?.(`bili-companion: 已投递到 ${sessionId.slice(-8)}`)
-          return sendJson(res, 200, { ok: true, delivered: true, sessionId })
+          return sendJson(res, 200, { ok: true, delivered: true, sessionId, resumed })
         } catch (error) {
           return sendJson(res, 500, {
             ok: false,
