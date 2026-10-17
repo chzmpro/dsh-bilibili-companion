@@ -386,6 +386,57 @@ def build_conventions(agents_path: Any = None) -> str:
     return "\n".join(picked).strip()
 
 
+def build_focus(db: Any, config: Any) -> dict[str, list[str]]:
+    """组装**主人的关注点**，供打分时传给模型。
+
+    ★ 这是"分数可不可信"的开关。不传的话模型只知道标题和证据，
+    压根不知道"对谁有用"，只能按"内容充实度"打 ——
+    实测后果：一条讲"B站上一堆AI号发一样评论"的吐槽视频拿 100 分，
+    而标题里明明写着"dsh插件"的视频只有 25 分。
+
+    来源（都是本地已有数据，**不额外发请求**）：
+      * keywords          ← `config.discovery.keywords`
+      * rules/likes/dislikes ← `owner_preferences` 表
+
+    读不到就返回空列表，**绝不抛异常**（打分降级好过整轮失败）。
+
+    与 `Pipeline.build_focus()` 等价，但**不依赖 Pipeline 实例** ——
+    这样独立脚本（rescore / rescore_all）也能用同一套逻辑。
+    """
+    focus: dict[str, list[str]] = {
+        "keywords": [],
+        "rules": [],
+        "likes": [],
+        "dislikes": [],
+    }
+    try:
+        discovery = getattr(config, "discovery", None)
+        keywords = getattr(discovery, "keywords", []) or []
+        focus["keywords"] = [str(k) for k in keywords if str(k).strip()]
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        rows = db.query(
+            "SELECT kind, content FROM owner_preferences WHERE active = 1"
+        )
+        for row in rows:
+            kind = str(row["kind"])
+            content = str(row["content"] or "").strip()
+            if not content:
+                continue
+            if kind == "rule":
+                focus["rules"].append(content)
+            elif kind == "like":
+                focus["likes"].append(content)
+            elif kind == "dislike":
+                focus["dislikes"].append(content)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return focus
+
+
 def find_agents_md() -> Path | None:
     """自动找 `AGENTS.md`（**全局优先**）。
 
