@@ -84,6 +84,38 @@ SYSTEM_PROMPT = """你是内容提炼助手。给你一个 B 站视频的**完�
 4. 评论里明显是刷屏/表情/无意义内容，忽略。"""
 
 
+#: 单项内容超过这个字数才需要豆包压缩（主人 2026-10-18 定的口径）。
+#:
+#: ★ 主人原话：「字幕、评论2500以下全文发送，2500以上豆包拣选有用的截断形成2500以下发送」
+#:
+#: 之前我**一律提炼**，是错的：
+#:   · 短内容本来就看得完，还去提炼 = 白花一次调用，还可能丢细节；
+#:   · 长内容才需要"挑有用的" —— 那才是豆包该干活的地方。
+CONDENSE_THRESHOLD = 2500
+
+#: 压缩后的目标上限（略低于阈值，留出拼接余量）。
+CONDENSE_TARGET = 2300
+
+CONDENSE_SYSTEM_PROMPT = """你是内容压缩助手。给你一段很长的 B 站视频文字
+（可能是字幕或评论区），请**挑出真正有用的部分**保留下来。
+
+判断"有用"的标准（按优先级）：
+1. **具体做法/配置/命令/参数**（能照着做的）
+2. **踩坑与限制**（"XX 会冲突"、"不要直接卸载"这类）
+3. **明确结论与数字**（版本号、性能数据、数量）
+4. 同类项目/竞品的自我介绍（谁做了什么）
+
+**丢掉**：寒暄、语气词、重复表达、纯情绪、无信息量的附和。
+
+输出要求：
+- 只输出保留下来的内容，**保留原话**（不要改写、不要总结成抽象概括）
+- 用短横线 `- ` 分条，每条独立
+- 总长度不超过 {target} 字
+- 不要任何前言、解释、标题
+
+如果原文里**有效信息很少**，就少输出几条，不要硬凑。"""
+
+
 @dataclass
 class Digest:
     """一个视频的提炼结果。"""
@@ -254,6 +286,73 @@ async def digest_video(
         caveats=_as_list(parsed.get("caveats")),
         model=model,
     )
+
+
+async def condense_text(
+    *,
+    text: str,
+    config: Any = None,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[str, bool]:
+    """把**过长**的单项内容压缩到 2500 字以下。
+
+    ★ 主人口径：「2500 以下全文发送，2500 以上豆包拣选有用的截断」。
+
+    Returns:
+        ``(内容, 是否压缩过)``。
+        · 不超阈值 ⇒ ``(原文, False)`` —— **一个字节都不动**，也不调模型；
+        · 超阈值 ⇒ ``(压缩结果, True)``；压缩失败则**退回原文前 2500 字**
+          （宁可给截断，也不能让值班员什么都拿不到）。
+    """
+    body = (text or "").strip()
+    if len(body) <= CONDENSE_THRESHOLD:
+        return body, False
+
+    key_env = str(getattr(getattr(config, "text_worker", None), "api_key_env", "") or "")
+    key = resolve_secret(key_env) if key_env else None
+    if not key:
+        return body[:CONDENSE_THRESHOLD], True
+
+    base_url = str(getattr(getattr(config, "text_worker", None), "base_url", "") or "")
+    model = str(getattr(getattr(config, "text_worker", None), "model", "") or "")
+    prompt = CONDENSE_SYSTEM_PROMPT.replace("{target}", str(CONDENSE_TARGET))
+
+    owns = client is None
+    http = client or httpx.AsyncClient(timeout=CALL_TIMEOUT, trust_env=False)
+    try:
+        response = await http.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": body[:SAFETY_CHARS]},
+                ],
+                "max_tokens": 2000,
+                "temperature": 0.2,
+            },
+        )
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return body[:CONDENSE_THRESHOLD], True
+    finally:
+        if owns:
+            await http.aclose()
+
+    if response.status_code != 200:
+        return body[:CONDENSE_THRESHOLD], True
+
+    content = ""
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            content = str(message.get("content") or "").strip()
+
+    if not content:
+        return body[:CONDENSE_THRESHOLD], True
+    return content[:CONDENSE_THRESHOLD], True
 
 
 def _parse_json(text: str) -> dict[str, Any] | None:

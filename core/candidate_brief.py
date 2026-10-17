@@ -49,7 +49,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-#: 简介喂给模型的最大字数（参考项目 2500）。
+#: 单项内容的处理阈值（主人 2026-10-18 定的口径）。
+#:
+#: ★ 主人原话：「字幕、评论2500以下全文发送，2500以上豆包拣选有用的
+#:   截断形成2500以下发送」
+#:
+#: 所以这里的 2500 **不是截断线，是分界线**：
+#:   · ≤2500 ⇒ 全文原样给（一个字节都不动）
+#:   · >2500 ⇒ 由 `core.candidate_digest.condense_text()` 挑有用部分压下来
 MAX_DESCRIPTION_CHARS = 2500
 
 #: 字幕喂给模型的最大字数（参考项目 2500）。
