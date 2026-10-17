@@ -437,6 +437,62 @@ async def read_source_tool(
 
 
 @server.tool(
+    name="dm_push",
+    description=(
+        "**主动私信主人**（公开写入，但接收者硬编码为 owner_mid）。"
+        "用于「推荐视频」这类主动推送，不是回复某条私信。"
+        "写之前请**真的读过**内容，说清「为什么值得看」，不要复述标题。"
+    ),
+)
+async def dm_push_tool(text: str) -> dict[str, Any]:
+    """主动发一条私信给主人（**不是回复**，不需要 msg_seqno）。
+
+    ★ 为什么单独做一个工具：`dm_reply` 必须有 `msg_seqno`（回复某条），
+    而"把评分最高的视频主动推给主人"没有对应的私信可回 —— 是主动推送。
+    走的是和自动回复同一条链路（`send_to_owner`），所以同样受门禁与限流保护。
+
+    ★ 硬性要求（写进工具描述里，模型看得见）：
+    文本必须基于**真实读过的内容**，说清价值，不许复述标题。
+    """
+    from core.dm import MAX_DM_CHARS, dm_reply_allowed
+
+    body = (text or "").strip()
+    if not body:
+        return R.fail(R.INVALID_ARGUMENT, "text 不能为空")
+    if len(body) > MAX_DM_CHARS:
+        return R.fail(R.INVALID_ARGUMENT, f"正文 {len(body)} 字，超过上限 {MAX_DM_CHARS}")
+
+    try:
+        runtime = await get_runtime()
+    except ConfigError as exc:
+        return R.fail(R.NOT_CONFIGURED, str(exc))
+
+    allowed, reason = dm_reply_allowed(runtime.config)
+    if not allowed:
+        return R.fail(R.BLOCKED, f"私信门禁拒绝：{reason}")
+
+    from core.dm import send_to_owner
+
+    bundle = await _load_cookie_bundle()
+    if bundle is None:
+        return R.fail(R.AUTH_REQUIRED, "没有可用凭据（需重新扫码登录）")
+
+    try:
+        result = await send_to_owner(
+            config=runtime.config, cookies=bundle, text=body, db=runtime.db
+        )
+    except Exception as exc:  # noqa: BLE001 —— 发送失败要如实返回
+        return R.fail(R.PLATFORM_ERROR, f"发送失败：{type(exc).__name__}")
+
+    return R.ok(
+        {
+            "msg_key": str(getattr(result, "msg_key", "") or ""),
+            "chars": len(body),
+        }
+    )
+
+
+@server.tool(
     name="dm_inbox",
     description=(
         "取**待回复的主人私信**（只读）。常驻监听进程发现新私信后写进队列，"
