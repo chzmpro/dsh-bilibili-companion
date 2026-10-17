@@ -48,6 +48,15 @@ from core.credentials import CredentialError, load_cookie  # noqa: E402
 from core.ratelimit import RequestQueue  # noqa: E402
 from core.storage import Database  # noqa: E402
 
+#: 默认节奏：**模仿人类翻视频**（主人 2026-10-18 指定）。
+#:
+#: 为什么不是"越快越好"：实测一次连打 75 条，虽然 throttle 的 metadata 通道
+#: 已限速 3 秒/次，仍触发了 B站 的异常行为判定，导致整批被停。
+#: 主人口径：单条间隔 10 秒、每 5 条多休息 20 秒。
+DEFAULT_DELAY_SECONDS = 10.0
+DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_REST_SECONDS = 20.0
+
 
 def targets(db: Database, *, limit: int = 0) -> list[dict[str, Any]]:
     """挑出「完全没有证据」的视频。
@@ -106,6 +115,21 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="给无证据的视频补抓简介")
     parser.add_argument("--run", action="store_true", help="真的抓（默认只预览）")
     parser.add_argument("--limit", type=int, default=0, help="只抓前 N 条")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=DEFAULT_DELAY_SECONDS,
+        help="每条的间隔秒数（默认 10，模仿人类）",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="每几条多休息一次"
+    )
+    parser.add_argument(
+        "--batch-rest",
+        type=float,
+        default=DEFAULT_BATCH_REST_SECONDS,
+        help="批次间休息秒数",
+    )
     args = parser.parse_args()
 
     config = load_config()
