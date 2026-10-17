@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -564,6 +564,41 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         12,
         """
         ALTER TABLE notes ADD COLUMN recommendation TEXT;
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v13 —— 豆包深度提炼（2026-10-18）
+    # ------------------------------------------------------------------
+    #
+    # 主人：「我既然有不要钱的豆包模型，那么就可以不采用截断的方式，
+    #   而是让豆包采取最有价值的字幕等信息，评论区中有许多@其主人介绍的
+    #   类似于本项目的大肥鱼，这些也可以让豆包分辨后总结它们的观点，
+    #   然后查看真实人类评论中的有效信息，最后再发给值班员」
+    #
+    # ★ 为什么不再截断：
+    #   1. 截断会丢真正的干货（长视频的关键结论常在中间/后半段）；
+    #   2. 豆包不要钱，让它**读全文**再提炼，成本几乎为 0；
+    #   3. 提炼后的结果**比截断更短**，交给值班员的上下文反而更干净。
+    #
+    # ★ 为什么单独一张表而不是塞进 notes：
+    #   notes 已经有 15 个字段了，再加 5 个会让"一条记录"变成大杂烩。
+    #   提炼结果结构不同（是 JSON 多段），单独存更好查、也便于重跑。
+    (
+        13,
+        """
+        CREATE TABLE IF NOT EXISTS candidate_digests (
+            bvid        TEXT PRIMARY KEY,
+            core_value  TEXT NOT NULL DEFAULT '',
+            highlights  TEXT NOT NULL DEFAULT '[]',
+            peers       TEXT NOT NULL DEFAULT '[]',
+            human_bits  TEXT NOT NULL DEFAULT '[]',
+            caveats     TEXT NOT NULL DEFAULT '[]',
+            digest_json TEXT NOT NULL DEFAULT '{}',
+            model       TEXT NOT NULL DEFAULT '',
+            created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_digest_created
+            ON candidate_digests(created_at DESC);
         """,
     ),
 )
