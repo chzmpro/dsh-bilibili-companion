@@ -1,28 +1,28 @@
-"""把评分结果**全部分批**推送给主人（B 站私信，2026-10-18）。
+"""把评分结果按**三档格式**分批推送给主人（B 站私信，2026-10-18）。
 
 ## 主人要求
 
-> 「这次打分所挑选的候选必须全部发给我」
+> 「合格的结果按照正常方式进行推荐，其他的发送标题加分数即可，
+>   最后再发个分数分布」
 
-98 条候选，B 站私信单条上限 **500 字** ⇒ 必须分批。
+## 三档
 
-## 设计
+| 档 | 条件 | 格式 |
+|---|---|---|
+| **合格推荐** | `score >= min_score_for_comment`（默认 75） | 标题 + 分数 + 分维度 + 链接 |
+| **其余** | `< 门槛` | 只有「分数 + BV + 标题」，一行一条 |
+| **分数分布** | 最后单独一条 | 分段计数 + 条形图 |
 
-1. 从 `notes` 表读全部有分的视频，按分数降序；
-2. 按 `--chunk` 条一组切片，每组拼一条私信（自动控制在 500 字内）；
-3. 逐条发送，**每条之间等 `--delay` 秒**（默认 8 秒，别把私信接口打限流）；
-4. `--top N` 只发前 N 条（默认全发）。
+## 为什么分三档
 
-## 为什么不复用 dm_reply
+98 条里大部分是低分（跟关注点无关的）。全部按推荐格式发，
+既超字数上限，也会把真正值得看的淹没在噪音里。
 
-`dm_reply` 是"回复某条私信"（需要 msg_seqno + 幂等）。
-这里是**主动推送**，走 `send_to_owner`（和自动回复同一条链路）。
-
-用法：
+## 用法
 
     ./.venv/Scripts/python.exe -u scripts/push_all_scores.py              # 预览
     ./.venv/Scripts/python.exe -u scripts/push_all_scores.py --send       # 真发
-    ./.venv/Scripts/python.exe -u scripts/push_all_scores.py --send --top 30
+    ./.venv/Scripts/python.exe -u scripts/push_all_scores.py --send --threshold 80
 """
 
 from __future__ import annotations
@@ -44,8 +44,14 @@ from core.storage import Database  # noqa: E402
 #: 每条私信之间等多久（秒）。太密会被私信接口限流。
 DEFAULT_DELAY = 8.0
 
-#: 默认每组几条（会按字数二次收窄）。
-DEFAULT_CHUNK = 8
+#: 分数分段的边界（用于最后的分布统计）。
+BUCKETS: tuple[tuple[str, int, int], ...] = (
+    ("90-100", 90, 100),
+    ("75-89", 75, 89),
+    ("50-74", 50, 74),
+    ("30-49", 30, 49),
+    ("0-29", 0, 29),
+)
 
 
 def load_scores(db: Database, *, top: int = 0) -> list[dict[str, Any]]:
@@ -67,57 +73,130 @@ def load_scores(db: Database, *, top: int = 0) -> list[dict[str, Any]]:
             "novelty": int(r["score_novelty"] or 0),
             "evidence": int(r["score_evidence"] or 0),
             "title": str(r["title"] or ""),
+            "source_url": str(
+                r["source_url"] or f"https://www.bilibili.com/video/{r['bvid']}"
+            ),
         }
         for r in db.query(sql)
     ]
 
 
-def build_chunks(rows: list[dict[str, Any]], *, chunk: int = DEFAULT_CHUNK) -> list[str]:
-    """把结果切成若干条私信（每条严格 ≤ MAX_DM_CHARS）。"""
-    total = len(rows)
+def _recommend_block(item: dict[str, Any], number: int) -> str:
+    """一条「合格推荐」的完整格式。"""
+    return "\n".join(
+        [
+            f"{number}. {item['score']}分 {item['bvid']}",
+            f"   {item['title'][:60]}",
+            f"   topic{item['topic']} 新颖{item['novelty']} 证据{item['evidence']}",
+            f"   {item['source_url']}",
+        ]
+    )
+
+
+def _plain_line(item: dict[str, Any]) -> str:
+    """一条「其余」的精简格式：分数 + BV + 标题。"""
+    return f"{item['score']} {item['bvid']} {item['title'][:22]}"
+
+
+def build_messages(rows: list[dict[str, Any]], *, threshold: int = 75) -> list[str]:
+    """切成若干条私信（每条 ≤ MAX_DM_CHARS）。"""
+    qualified = [r for r in rows if r["score"] >= threshold]
+    others = [r for r in rows if r["score"] < threshold]
+
     messages: list[str] = []
-    index = 0
+
+    # ---- 第 1 档：合格推荐（详细格式，每条私信最多 4 个）----
     page = 1
-    while index < total:
-        header = f"【全量评分 {page}】共 {total} 条，按分数排序："
+    index = 0
+    while index < len(qualified):
+        header = (
+            f"【合格推荐 {page}】≥{threshold} 分，共 {len(qualified)} 条"
+            if page == 1
+            else f"【合格推荐 {page}（续）】"
+        )
         lines = [header, ""]
         added = 0
-        while index < total and added < chunk:
-            item = rows[index]
-            line = f"{item['score']} {item['bvid']} {item['title'][:18]}"
-            # 预估加上这条会不会超
-            if len("\n".join([*lines, line])) > MAX_DM_CHARS - 2:
+        while index < len(qualified) and added < 4:
+            block = _recommend_block(qualified[index], index + 1)
+            if len("\n".join([*lines, block])) > MAX_DM_CHARS - 2:
                 break
-            lines.append(line)
+            lines.append(block)
+            lines.append("")
             index += 1
             added += 1
         if added == 0:
-            # 单条就超长（标题特别长）⇒ 硬截断这一条，避免死循环
-            item = rows[index]
-            lines.append(f"{item['score']} {item['bvid']}")
             index += 1
-        messages.append("\n".join(lines))
+            continue
+        messages.append("\n".join(lines).rstrip())
         page += 1
+
+    # ---- 第 2 档：其余候选（只有标题+分数）----
+    if others:
+        page = 1
+        index = 0
+        while index < len(others):
+            header = (
+                f"【其余 {len(others)} 条】<{threshold} 分，仅记录："
+                if page == 1
+                else f"【其余（续 {page}）】"
+            )
+            lines = [header, ""]
+            while index < len(others):
+                line = _plain_line(others[index])
+                if len("\n".join([*lines, line])) > MAX_DM_CHARS - 2:
+                    break
+                lines.append(line)
+                index += 1
+            if len(lines) == 2:  # 一条都没塞进去（标题超长）⇒ 硬加
+                lines.append(_plain_line(others[index]))
+                index += 1
+            messages.append("\n".join(lines))
+            page += 1
+
+    # ---- 第 3 档：分数分布 ----
+    total = len(rows)
+    lines = [f"【分数分布】共 {total} 条：", ""]
+    for label, low, high in BUCKETS:
+        count = sum(1 for r in rows if low <= r["score"] <= high)
+        bar = "█" * min(count, 30)
+        lines.append(f"{label:>7}: {count:>3} 条 {bar}")
+    lines.append("")
+    lines.append(f"合格（≥{threshold}）{len(qualified)} 条 · 其余 {len(others)} 条")
+    messages.append("\n".join(lines))
+
     return messages
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser(description="分批推送全部评分结果")
+    parser = argparse.ArgumentParser(description="三档分批推送评分结果")
     parser.add_argument("--send", action="store_true", help="真的发（默认只预览）")
     parser.add_argument("--top", type=int, default=0, help="只发前 N 条（默认全发）")
-    parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="每条私信几条")
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=0,
+        help="合格门槛（默认取 config 的 min_score_for_comment，通常是 75）",
+    )
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="私信间隔秒数")
     args = parser.parse_args()
 
     db = Database()
     db.migrate()
     try:
+        config = load_config()
+        threshold = args.threshold or int(config.discovery.min_score_for_comment)
+
         rows = load_scores(db, top=args.top)
         if not rows:
             print("notes 表里还没有分数（先跑 rescore_all.py）")
             return 1
-        messages = build_chunks(rows, chunk=args.chunk)
-        print(f"共 {len(rows)} 条候选，切成 {len(messages)} 条私信")
+
+        messages = build_messages(rows, threshold=threshold)
+        qualified = [r for r in rows if r["score"] >= threshold]
+        print(
+            f"共 {len(rows)} 条 | 合格(≥{threshold}) {len(qualified)} 条 "
+            f"| 其余 {len(rows) - len(qualified)} 条 | 切成 {len(messages)} 条私信"
+        )
         for number, text in enumerate(messages, start=1):
             print(f"\n--- 第 {number}/{len(messages)} 条（{len(text)} 字）---")
             print(text)
@@ -126,7 +205,6 @@ async def main() -> int:
             print("\n（预览模式。要真发：加 --send）")
             return 0
 
-        config = load_config()
         try:
             bundle = load_cookie()
         except CredentialError as exc:
@@ -138,8 +216,10 @@ async def main() -> int:
             result = await send_to_owner(
                 config=config, cookies=bundle, text=text, db=db
             )
-            key = getattr(result, "msg_key", "")
-            print(f"  [{number}/{len(messages)}] ✅ msg_key={key}")
+            print(
+                f"  [{number}/{len(messages)}] ✅ "
+                f"msg_key={getattr(result, 'msg_key', '')}"
+            )
             sent += 1
             if number < len(messages):
                 time.sleep(args.delay)
