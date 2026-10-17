@@ -1,0 +1,140 @@
+# B 站自主学习与互动小号 —— 配置样例
+#
+# ⚠️ 本文件**不得**包含任何真实凭据：
+#    - 没有 Cookie / SESSDATA / token
+#    - 没有 API key 的值（只写"密钥所在的环境变量名"）
+# 复制成 config.yaml 后由人填写。config.yaml 已被 .gitignore 忽略。
+#
+# ⚠️ UID 不是凭据，可以写在配置里（任务书要求"身份以 UID 为准"）。
+#    下面的值是**占位符**；真实值用脚本从实际登录态读：
+#        ./.venv/Scripts/python.exe scripts/read_account_identity.py
+
+account:
+  agent_mid: 0 # B 站小号 UID；0 = 尚未配置（只读功能仍可用）
+  owner_mid: 0 # 主人主号 UID；0 = 尚未配置（此时不得声称完成 @ 汇报）
+  owner_name_hint: "" # 仅帮助找 @ 候选；身份一律以 UID 为准
+
+discovery:
+  keywords:
+    - "DSH插件"
+    - "DeepSeek Harness"
+    - "DSH 插件"
+  published_within_days: 2 # curator 原值 lookback_hours=48 → 2 天
+  max_candidates_per_run: 30 # curator 原值 max_candidates=30
+  max_full_reads_per_run: 5 # curator 原值 max_items_per_run=5
+  min_score_for_comment: 75
+  # ★ 打分权重：主题相关度（topic）占总分多少（0.5~0.95）
+  #   越高越只看「跟我有关」；越低越看内容质量本身。
+  #   实测 12 条样本：0.6→区分度+48.8，0.8→+55.5（默认）
+  score_topic_weight: 0.80
+  # ★ 推荐流候选词**自动回填**关键词 —— 默认 false（要人审）。
+  #   true = 候选词直接写进上面的 keywords，不用过目。
+  #   ⚠️ 代价：推荐流是算法喂的，自动回填等于让**算法间接决定小号关注什么**。
+  #   无论开关如何，每日轮次上限（2）与单次条数上限（8）都始终生效。
+  auto_accept_suggestions: false
+
+persona:
+  # ★ 以下取自 curator 的 docs/13-agent-persona.md（21 题问卷定稿）
+  #   与人设一并生效；改动请同步 docs/persona.md
+  display_name: "干饭不干事的小鲸鱼"
+  nicknames: ["小肥鱼", "吃白饭的小肥鱼", "小白"]
+
+  # ★ AI 身份策略（主人 2026-10-15 定："可以适度表明，毕竟名称就已经表示了一些"）
+  #   never      完全不提（原人设 B8 甲）
+  #   when_asked 只在被直接问到时说明（默认，适度）
+  #   proactive  主动自我介绍是 AI
+  #   ⚠️ 没有"假装真人"这一档 —— 任务书 §6.4 明令"不得冒充真人观众"
+  ai_identity: "when_asked"
+
+  # ★ 点赞 / 收藏（主人要求实现；任务书原本漏了这两项）
+  enable_liking: true
+  enable_favoriting: true
+  like_min_score: 8.0
+  like_min_not_hype: 8.0
+  like_max_per_author_per_day: 2
+  favorite_min_score: 8.0
+  favorite_folders: ["工具与技术", "方法论", "案例与实操", "观点与洞察", "待深挖"]
+  allow_create_folders: true
+  allow_reply_others: true
+  allow_follow: false # 红线：不关注任何人（改 true 会被配置校验拒绝）
+  allow_negative_feedback: false # 红线：不做任何负反馈（改 true 会被拒绝）
+  max_items_per_run: 5
+
+bilibili_requests:
+  # 所有 B 站请求共用限速。这些是负载控制，**不构成免风控保证**。
+  min_interval_seconds: 5
+  max_read_retries: 2 # 仅可重试明确的只读暂态失败
+  backoff_base_seconds: 5
+  backoff_cap_seconds: 60
+  max_consecutive_rate_limits: 2 # 连续限流达此阈值 → 暂停自动访问并通知主人
+  search_cache_ttl_seconds: 43200
+  metadata_cache_ttl_seconds: 300
+  subtitle_cache_ttl_seconds: 86400
+
+text_worker:
+  enabled: true
+  provider: volcengine_ark
+  base_url: "https://ark.cn-beijing.volces.com/api/v3"
+  model: "doubao-seed-2-0-lite-260428" # curator 在用的模型
+  api_key_env: "doubao-seed-2-0-lite-260428-API-KEY" # ★ 只写变量名，绝不写值
+  # ★ 单次批处理的**时间预算**（秒）。必须小于 DSH 的 toolCallTimeoutMs，
+  #   否则工具调用会在中途被掐断（实测踩到过：真实一轮 198s vs 超时 120s）。
+  #   预算耗尽时会**主动收尾**并返回已完成部分，不会丢结果。
+  max_batch_seconds: 240.0
+  max_candidates_to_dsh: 3 # 每批最多给 DSH 3 个短候选包（硬上限）
+  max_batch_chars: 6000
+  max_excerpt_chars: 500 # DSH 单次按证据索取的原文上限（硬上限）
+  timeout_seconds: 60
+  # ★ 本地 ASR 兜底（默认关）：字幕不可用的视频在本机转写一遍，**不花 API 钱**。
+  #   开启前提：装 faster-whisper + yt-dlp（约 1 GB，含 Whisper 模型）。
+  #   缺依赖不会让读取失败，只会记一条 ASR_NO_DEPENDENCY。
+  #   ⚠️ 转写返回空 = **这条视频没有语音**（纯音乐/纯录屏），不是故障。
+  asr_fallback: false
+  asr_model: "small" # tiny / base / small / medium
+
+schedule:
+  # on_host_start = 打开 DSH 时唤醒（每天一轮）
+  # daily         = 每日固定时刻
+  # continuous    = **持续跑**：每隔 interval_minutes 一轮，跑满 max_runs_per_day 自动停
+  mode: "on_host_start" # on_host_start | daily | continuous
+  timezone: "Asia/Shanghai"
+  daily_time: "10:00" # 仅 mode=daily 时生效
+  min_gap_minutes: 120 # 反复开关 DSH 时不重复跑（防抖）
+  # ★ 只在谷时跑（DeepSeek 官方口径：工作日 9–12 / 14–18 是高峰，
+  #   其余含整个周末都是谷时）。到期但正处峰时 → 挡下并提示等到谷时。
+  peak_valley: false
+  # ---- 持续跑（mode=continuous 时生效）----------------------------------
+  # ⚠️ 刻意**不做真正的无限循环** —— 那会明显增加请求量与风控风险。
+  #    改成"每 N 分钟一轮 + 每天上限 + 到点自动停"，仍走全部既有门禁。
+  interval_minutes: 30 # 两轮之间的间隔（≥5）
+  max_runs_per_day: 8 # 每天最多几轮，跑满自动停
+
+interaction:
+  mode: "observe" # observe | review | auto
+  dry_run: true # 模拟动作与真实动作使用隔离的状态/计数
+  publish_enabled: false
+
+  # ★ 频率档位（主人要求"多档可选"）。展开成下面的具体配额。
+  #   conservative  评论1/回复3/赞8/藏3，间隔25min  ← 默认，出过验证码后定的档
+  #   normal        评论3/回复6/赞15/藏5，间隔15min
+  #   active        评论5/回复10/赞30/藏5，间隔10min（仅在你明确知晓风险时用）
+  frequency_tier: "conservative"
+
+  # 想微调就逐项写 —— **显式值优先于档位**
+  max_top_comments_per_day: 1
+  max_replies_per_day: 3
+  max_replies_per_thread_per_day: 2
+  max_likes_per_day: 8
+  max_favorites_per_day: 3
+  min_action_interval_min: 25
+
+  allow_third_party_threads: false # 评论区第三方讨论：默认关
+  pause: false
+
+report:
+  local_digest: true
+  mention_owner_on_high_value_comment: true
+  # ★ 主人定的"双峰"（B13 甲）
+  mention_like_threshold: 10000 # 点赞 ≥ 此值 → 公开 @主号（大众爆款）
+  share_like_threshold: 50 # 点赞 ≤ 此值且内容好 → 私信/分享（小众宝藏）
+  push_times: ["10:00", "17:00"] # 汇报推送时间（不是唤醒时机）

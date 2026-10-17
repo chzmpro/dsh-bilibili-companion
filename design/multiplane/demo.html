@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh"><meta charset="utf-8"><title>design assets demo</title>
+<link rel="stylesheet" href="/multiplane/runtime/shot.css">
+<style>
+/* ★ 字体来自 dsh-raw-html 的 25 款内置字体。
+   ⚠️ 必须放在**资源根之下**（不能 ../ 越出），且要在 Shot.define 的
+      fonts 里显式声明 —— 否则 Multiplane 报 resource_missing / font_not_awaited。 */
+@font-face{font-family:Lanxi-HeiTiBold;src:url('./fonts/Lanxi-HeiTiBold.woff2')}
+@font-face{font-family:Lanxi-WenKai;src:url('./fonts/Lanxi-WenKai.woff2')}
+
+#stage{width:960px;height:540px;background:#0d1117;color:#e6edf3;
+       display:flex;flex-direction:column;justify-content:center;align-items:center;gap:20px}
+#title{font-family:Lanxi-HeiTiBold,system-ui;font-size:64px;letter-spacing:2px}
+#sub{font-family:Lanxi-WenKai,serif;font-size:30px;color:#7d8590}
+#bar{width:0;height:6px;background:#3b82f6;border-radius:3px}
+</style>
+<div id="stage">
+  <div id="title">小肥鱼做视频</div>
+  <div id="sub">字体与设计规范来自 dsh-raw-html</div>
+  <div id="bar"></div>
+</div>
+<script src="/multiplane/runtime/shot.js"></script>
+<script>
+const bar = document.querySelector('#bar');
+const sub = document.querySelector('#sub');
+Shot.define({
+  duration: 2,
+  fps: 24,
+  // ★ 显式声明：Multiplane 靠这个在渲染前等字体加载完
+  fonts: [
+    ['64px Lanxi-HeiTiBold', '小肥鱼做视频'],
+    ['30px Lanxi-WenKai', '字体与设计规范来自'],
+  ],
+  render(t) {
+    bar.style.width = (t / 2) * 620 + 'px';
+    sub.style.opacity = String(Math.min(1, t * 1.5));
+  },
+});
+</script></html>

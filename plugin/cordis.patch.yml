@@ -1,0 +1,25 @@
+# dsh-bili-companion bundle patch.
+#
+# 🔴 契约（2026-10-16 两次安全模式事故换来的结论 —— **本文件只允许一行**）：
+#
+#   · 一行 insert 即挂载 **Host 半身**（index.js 的 apply）。
+#   · **浏览器半身**（client.js）由 package.json 的 `dsh.client` 声明，
+#     并绑定在「name 为裸包名」的那一行上。
+#   · ★★ **本文件里绝不能再加第二个插件行（例如 MCP 客户端）**：
+#     多了之后，两行都会被标注 `__dshPluginOwner.packageName = dsh-bili-companion`，
+#     于是浏览器端被挂载**两次**，DSH 直接报：
+#         client-modules: duplicate factory registration for "bili-companion"
+#                           (bundle executed twice without invalidate?)
+#     → **进入安全模式**（本机已复现两次）。
+#
+#   · MCP 客户端那行**放在 profile 自己的 `cordis.patch.yml` 里**
+#     （来源：`<项目>/dsh/cordis.patch.fragment.yml`，合并进 profile）。
+#     即：**插件包管自己，profile 管 MCP**，两边各一行，互不重叠。
+#
+# 对照参照：`dsh-our-free-model`（本机长期可用的插件）patch 就是**只有一行**。
+#
+# ⚠️ 装完必须按顺序验证：`plugin add` → 形态体检 → `--dump-config` → 真实重启。
+- insert:
+    - id: bili-companion
+      name: 'dsh-bili-companion'
+      config: {}

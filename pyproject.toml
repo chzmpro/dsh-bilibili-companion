@@ -1,0 +1,64 @@
+[project]
+name = "dsh-bilibili-companion"
+version = "0.1.0"
+description = "DSH 驱动的 B 站自主学习与互动小号：Python MCP bridge + 豆包文字处理器 + SQLite 状态"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2,<3",
+    "httpx>=0.27",
+    "pydantic>=2",
+    "pyyaml>=6",
+    "typer>=0.12",
+    # Windows 的 Python 不自带 IANA 时区库；缺它时 zoneinfo 会直接报
+    # "No time zone found with key Asia/Shanghai"（本机实测）
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff", "mypy"]
+
+[project.scripts]
+companion = "cli.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core", "bridge", "cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "C4", "RET", "ARG"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]
+# schema.py 里是 SQL DDL 文本，长行是列定义本身，不拆行更可读
+"core/schema.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_untyped_decorators = false
+files = ["core", "bridge", "cli"]
+
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+
+# 可选依赖（只有"本地 ASR 兜底"才用得到，**默认不装**）：
+# 它们是**运行时按需 import** 的，缺了要给"人话错误"而不是 ImportError 崩掉。
+# 这里放行缺失存根 —— 调用点已用 try/except ImportError 兜住。
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*", "yt_dlp.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:core.*", "error::DeprecationWarning:bridge.*"]
