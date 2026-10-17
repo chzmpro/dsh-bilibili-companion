@@ -644,6 +644,48 @@ class _AsrFailure(Exception):
         super().__init__(message or code)
 
 
+def _local_model_dir(model: str) -> Path | None:
+    """找本地已下载的 faster-whisper 模型目录（找不到返回 None）。
+
+    结构（本机实测）::
+
+        .local-data/.hf-cache/hub/models--Systran--faster-whisper-small/
+            snapshots/modelscope/{config.json, model.bin, tokenizer.json, vocabulary.txt}
+
+    ★ 为什么必须找本地：`HF_ENDPOINT` 指向 ModelScope 后，
+    `WhisperModel("small")` 走下载会失败（ModelScope 没有元数据端点）。
+    详见 `_transcribe_file` 里的注释。
+    """
+    if not model:
+        return None
+    # 已经是本地目录就直接用
+    candidate = Path(model)
+    if candidate.is_dir() and (candidate / "model.bin").is_file():
+        return candidate
+
+    home = os.environ.get("HF_HOME", "").strip()
+    roots: list[Path] = []
+    if home:
+        roots.append(Path(home))
+    try:
+        from core.paths import data_dir
+
+        roots.append(data_dir() / ".hf-cache")
+    except Exception:  # noqa: BLE001
+        pass
+    roots.extend([Path.home() / ".cache" / "huggingface"])
+
+    repo = f"models--Systran--faster-whisper-{model}"
+    for root in roots:
+        base = root / "hub" / repo / "snapshots"
+        if not base.is_dir():
+            continue
+        for snapshot in sorted(base.iterdir(), reverse=True):
+            if (snapshot / "model.bin").is_file():
+                return snapshot
+    return None
+
+
 def _transcribe_file(path: str, *, model: str, lang: str) -> str:
     """加载模型并转写，返回**纯文本**（可能是空串）。
 
@@ -653,9 +695,25 @@ def _transcribe_file(path: str, *, model: str, lang: str) -> str:
     configure_hf_environment()
     from faster_whisper import WhisperModel
 
-    print(f"[asr] 加载模型 {model}（第一次会自动下模型，之后就是本地读）…", file=sys.stderr)
+    # ★★ 优先用**本地已下载**的模型目录（2026-10-18 真机踩到）
+    #
+    # 现象：`WhisperModel("small")` 走下载路径，报
+    #     `加载 Whisper 模型失败：Expecting value: line 1 column 1 (char 0)`
+    # 根因：`HF_ENDPOINT` 被改成 ModelScope，而 **ModelScope 没有 `/api/models/`
+    #       元数据端点** ⇒ `huggingface_hub` 去解析 JSON 时拿到空/HTML ⇒ 解析失败。
+    #       （`AGENTS.md` 的「网络通道」一节早记过这个坑）
+    #
+    # 但本机 `.local-data/.hf-cache/hub/models--Systran--faster-whisper-<model>/`
+    # 里**模型其实已经下好了**。所以只要把本地目录直接传给 WhisperModel，
+    # 就完全绕开下载和那个坏掉的元数据接口。
+    local = _local_model_dir(model)
+    target = str(local) if local is not None else model
+    if local is not None:
+        print(f"[asr] 用本地模型 {local}", file=sys.stderr)
+    else:
+        print(f"[asr] 加载模型 {model}（本地没有，会去下）…", file=sys.stderr)
     try:
-        engine = WhisperModel(model, device="cpu", compute_type="int8")
+        engine = WhisperModel(target, device="cpu", compute_type="int8")
     except Exception as exc:  # 模型下载失败 / 磁盘满 / 显存问题……
         raise _AsrFailure(CODE_ERROR, f"加载 Whisper 模型失败：{exc}") from exc
 
