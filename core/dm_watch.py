@@ -324,6 +324,13 @@ class DmWatcher:
                 f"发现 {found} 条新消息（入队 {queued}）：{outcome.new_messages[-1]['text'][:30]}",
             )
 
+            # ★ 投递给「值班员」会话（主人自建的常驻会话，零冷启动）
+            #
+            # 主人：「难道不能我自己专门开个会话给你用吗，非得你自己调用呢」
+            # ⇒ 是的，而且更好：`agents.get(sid).followup(msg)` 把私信投进去，
+            #   那个 agent 自己思考、自己调 dm_reply，不用起新进程。
+            await self._deliver_to_duty(outcome.new_messages[-1])
+
         replied = 0
         if found and self.auto_reply:
             allowed, reason = dm_reply_allowed(self.config)
@@ -356,6 +363,42 @@ class DmWatcher:
             "replied": replied,
             "skipped": outcome.skipped,
         }
+
+    async def _deliver_to_duty(self, message: dict[str, Any]) -> bool:
+        """把新私信**投递**给值班员会话（失败不影响主流程）。
+
+        ★ 为什么这条比 headless 好：值班员会话的 agent 已在内存里，
+        `followup` 只是往它的 inbox 塞一条并唤醒 —— **零冷启动**。
+        作为对比，`dsh --profile headless` 每轮要 20 秒。
+
+        Returns:
+            是否投递成功。
+        """
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return False
+        title = str(message.get("title") or "").strip()
+        if title:
+            text = f"{text}（分享视频：{title}）"
+
+        prompt = (
+            "【主人的新私信】" + text + chr(10) + chr(10)
+            + "请调用 dm_inbox 取出待回复的私信，用你自己的判断写回复，"
+            + "然后调 dm_reply 发出。不要用模板。"
+        )
+        try:
+            from core.dm_deliver import deliver_async
+
+            result = await deliver_async(prompt)
+            if result.ok and result.delivered:
+                self.stats.add("delivered", f"已投递给值班员（{result.session_id[-8:]}）")
+                return True
+            self.stats.add(
+                "skipped", f"投递失败 {result.error_code}：{result.message[:60]}"
+            )
+        except Exception as exc:  # noqa: BLE001 —— 投递失败不该让监听崩
+            self.stats.add("skipped", f"投递异常：{type(exc).__name__}")
+        return False
 
     async def _doubao_factory(self, messages: list[dict[str, Any]]) -> str:
         """默认回复生成器：**用豆包**（主人选的方案 A）。
