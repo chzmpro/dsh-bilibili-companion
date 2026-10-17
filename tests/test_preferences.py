@@ -118,7 +118,7 @@ def test_migration_v3_to_v4_preserves_data(tmp_path: object) -> None:
     db2.close()
 
 
-def test_schema_version_is_9() -> None:
+def test_schema_version_is_10() -> None:
     """v5 = 评论可见性复核账本（``verify_ledger``，P1 2026-10-16）。
 
     ⚠️ **迁移版本号只能追加，不能改已应用的版本**
@@ -126,6 +126,6 @@ def test_schema_version_is_9() -> None:
     """
     from core import schema
 
-    assert schema.SCHEMA_VERSION == 9
+    assert schema.SCHEMA_VERSION == 10
     versions = [v for v, _ in schema.MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9], "迁移版本必须连续"
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "迁移版本必须连续"

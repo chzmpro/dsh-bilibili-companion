@@ -51,6 +51,7 @@ from typing import Any
 
 from core.dm import MAX_DM_CHARS, dm_reply_allowed
 from core.dm_live import poll_once, reply_to
+from core.dm_reply_gen import generate_reply
 from core.storage import Database
 
 #: 默认轮询间隔（秒）。
@@ -198,8 +199,10 @@ class DmWatcher:
         self.auto_reply = bool(auto_reply)
         #: 固定话术；留空用 :data:`FALLBACK_REPLY`
         self.reply_text = (reply_text or "").strip()
-        #: 可选：一个 `async (messages) -> str` 的生成器（将来接豆包）
-        self.reply_factory = reply_factory
+        #: 可选：一个 `async (messages) -> str` 的生成器。
+        #: ★ 不传时**自动用豆包**（主人选的方案 A）——
+        #: 因为常驻进程只能调豆包（DSH 的 key 拿不到，见 dm_reply_gen 的说明）。
+        self.reply_factory = reply_factory or self._doubao_factory
         self.stats = WatchStats()
         self._stop = False
 
@@ -217,6 +220,46 @@ class DmWatcher:
         if self.db is None:
             raise RuntimeError("DmWatcher 既没有 db 也没有 db_factory")
         return self.db
+
+    def _record_inbox(self, messages: list[dict[str, Any]]) -> int:
+        """把新消息写进 ``dm_inbox``（状态 pending），供 **DSH** 取走思考。
+
+        ★ 为什么不让监听进程自己调模型（主人要求）：
+        「私信要求尽量是让 DSH 进行思考而不是内置的那个低级模型」。
+        而 DeepSeek 的凭据在 DSH 内部、不落配置 ⇒ 监听进程**拿不到**，
+        所以它只负责"发现 + 入队"，**回复由 DSH 用自己的模型生成**。
+
+        Returns:
+            新写入的条数。
+        """
+        db = self._handle()
+        written = 0
+        now = int(time.time())
+        for item in messages:
+            seqno = int(item.get("msg_seqno") or 0)
+            if seqno <= 0:
+                continue
+            existing = db.query_one(
+                "SELECT msg_seqno FROM dm_inbox WHERE msg_seqno = ?", (seqno,)
+            )
+            if existing is not None:
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO dm_inbox "
+                "(msg_seqno, text, title, bvid, received_at, status, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    seqno,
+                    str(item.get("text") or "")[:MAX_DM_CHARS],
+                    str(item.get("title") or "")[:200],
+                    str(item.get("bvid") or ""),
+                    int(item.get("timestamp") or now),
+                    "pending",
+                    now,
+                ),
+            )
+            written += 1
+        return written
 
     def _queue(self) -> Any:
         """取本次调用该用的 RequestQueue 句柄。
@@ -274,8 +317,11 @@ class DmWatcher:
         self.stats.found += found
 
         if found:
+            # ★ 关键：**先入队**，让 DSH 能取走思考（即使不开自动回复）
+            queued = self._record_inbox(outcome.new_messages)
             self.stats.add(
-                "found", f"发现 {found} 条新消息：{outcome.new_messages[-1]['text'][:30]}"
+                "found",
+                f"发现 {found} 条新消息（入队 {queued}）：{outcome.new_messages[-1]['text'][:30]}",
             )
 
         replied = 0
@@ -284,24 +330,24 @@ class DmWatcher:
             if not allowed:
                 self.stats.add("skipped", f"自动回复被门禁拒绝：{reason}")
             else:
-                # 只回**最新一条**（避免一次刷多条，更像人）
-                for item in outcome.new_messages[-MAX_PER_ROUND:]:
-                    text = await self._compose_reply(outcome.new_messages)
-                    if not text:
-                        continue
+                # 只回**最新一条**（避免一次刷多条，更像人）。
+                # 前面的几条作为"历史上下文"喂给生成器 ——
+                # 主人说过「可以查看我前面的发言并回复我吗」，只给最后一句会答得莫名其妙。
+                target = outcome.new_messages[-1]
+                text = await self._compose_reply(outcome.new_messages)
+                if text:
                     ok, message = await reply_to(
                         db=self._handle(),
                         config=self.config,
                         cookies=self.cookies,
-                        msg_seqno=int(item["msg_seqno"]),
+                        msg_seqno=int(target["msg_seqno"]),
                         text=text,
                     )
                     if ok:
                         replied += 1
-                        self.stats.add("replied", message)
+                        self.stats.add("replied", f"已回 {target['msg_seqno']}")
                     else:
                         self.stats.add("skipped", message)
-                    break  # 一轮只回一条
 
         self.stats.replied += replied
         return {
@@ -310,6 +356,30 @@ class DmWatcher:
             "replied": replied,
             "skipped": outcome.skipped,
         }
+
+    async def _doubao_factory(self, messages: list[dict[str, Any]]) -> str:
+        """默认回复生成器：**用豆包**（主人选的方案 A）。
+
+        ★ 为什么要带历史：主人说过「可以查看我前面的发言并回复我吗」——
+        只给最后一句会让回复显得莫名其妙。
+
+        ★ 失败时抛异常，由 `_compose_reply` 退回固定话术（不让监听崩）。
+        """
+        incoming = str(messages[-1].get("text") or "") if messages else ""
+        if not incoming:
+            return ""
+        # 把队列里的前几条当历史（同一批消息就是"前面的发言"）
+        history = [
+            {"text": str(m.get("text") or ""), "from_owner": True,
+             "title": str(m.get("title") or "")}
+            for m in messages[:-1]
+        ]
+        result = await generate_reply(
+            incoming=incoming, history=history, config=self.config
+        )
+        if not result.ok:
+            raise RuntimeError(f"{result.error_code}: {result.message}")
+        return result.text
 
     async def _compose_reply(self, messages: list[dict[str, Any]]) -> str:
         """决定回什么。

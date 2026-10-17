@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -488,6 +488,39 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
             ON evolution_proposals(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_evolution_status
             ON evolution_proposals(status, created_at DESC);
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v10 —— 私信**待回复队列**（2026-10-17）
+    # ------------------------------------------------------------------
+    #
+    # 主人：*"我的私信要求尽量是让 DSH 进行思考而不是内置的那个低级模型"*。
+    #
+    # 为什么需要一张表：
+    #   常驻监听进程**拿不到 DeepSeek 的 key**（凭据在 DSH 内部，不落配置），
+    #   所以它**不能**自己调模型。正确分工是：
+    #
+    #     监听进程：发现新私信 → 落进本表（pending）
+    #     DSH：调 `dm_inbox` 取出待回复 → **用 DSH 自己的模型思考** → `dm_reply` 发出
+    #
+    #   ⇒ 回复质量由 DSH 的模型决定，不是豆包那个小的。
+    #
+    # 为什么要 `handled` 字段：同一条不能回两次（与 `dm_replies` 双重保险）。
+    (
+        10,
+        """
+        CREATE TABLE IF NOT EXISTS dm_inbox (
+            msg_seqno  INTEGER PRIMARY KEY,
+            text       TEXT NOT NULL DEFAULT '',
+            title      TEXT NOT NULL DEFAULT '',
+            bvid       TEXT NOT NULL DEFAULT '',
+            received_at INTEGER NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','answered','ignored')),
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dm_inbox_status
+            ON dm_inbox(status, received_at DESC);
         """,
     ),
 )

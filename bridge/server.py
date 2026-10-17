@@ -437,6 +437,151 @@ async def read_source_tool(
 
 
 @server.tool(
+    name="dm_inbox",
+    description=(
+        "取**待回复的主人私信**（只读）。常驻监听进程发现新私信后写进队列，"
+        "这里取出来 —— **你要用自己的脑子想怎么回**，不要用固定话术。"
+        "想好之后调 dm_reply 发出。"
+    ),
+)
+async def dm_inbox_tool(limit: int | None = None) -> dict[str, Any]:
+    """取待回复队列（**只读**，不改变状态）。
+
+    ★ 分工（主人要求「让 DSH 进行思考而不是内置的那个低级模型」）：
+
+    ```
+    常驻监听进程：发现新私信 → 写进 dm_inbox（pending）
+    你（DSH）   ：调 dm_inbox 取出来 → **用自己的模型思考** → 调 dm_reply 发出
+    ```
+
+    ★ 为什么要这样：DeepSeek 的凭据在 DSH 内部、不落配置文件，
+    所以监听进程**拿不到 key**，无法自己调模型 —— 它只能"发现"。
+    回复质量交给 DSH 的模型。
+    """
+    try:
+        runtime = await get_runtime()
+    except ConfigError as exc:
+        return R.fail(R.NOT_CONFIGURED, str(exc))
+
+    cap = 5 if limit is None else max(1, min(int(limit), 20))
+    db = runtime.db
+    db.migrate()  # 确保 v10 表存在
+
+    rows = db.query(
+        "SELECT msg_seqno, text, title, bvid, received_at "
+        "FROM dm_inbox WHERE status = 'pending' "
+        "ORDER BY received_at ASC LIMIT ?",
+        (cap,),
+    )
+
+    items = [
+        {
+            "msg_seqno": int(row["msg_seqno"]),
+            "text": str(row["text"] or ""),
+            "title": str(row["title"] or ""),
+            "bvid": str(row["bvid"] or ""),
+            "received_at": int(row["received_at"]),
+            "when": _format_ts(int(row["received_at"])),
+        }
+        for row in rows
+    ]
+
+    return R.ok(
+        {
+            "pending": len(items),
+            "items": items,
+            "next": (
+                "读 items[*].text，**自己判断该怎么回**（别用模板），"
+                "然后调 dm_reply(msg_seqno=..., text=...)。"
+                if items
+                else "没有待回复的私信。"
+            ),
+            "note": (
+                "如果 items 里有分享卡片（bvid 非空），"
+                "可以先用 read_video 或 find_repo 了解它再回复。"
+            ),
+        }
+    )
+
+
+def _format_ts(ts: int) -> str:
+    """把 Unix 时间戳格式化成 ``MM-DD HH:MM``（人看的）。"""
+    import datetime as _dt
+
+    try:
+        return _dt.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
+@server.tool(
+    name="dm_reply",
+    description=(
+        "**回复主人的一条私信**（这是公开写入，但接收者硬编码为 owner_mid）。"
+        "文本由你自己想，**不要用固定套话**。幂等：同一条只回一次。"
+    ),
+)
+async def dm_reply_tool(msg_seqno: int, text: str) -> dict[str, Any]:
+    """回复一条私信（幂等 + 只回主人）。
+
+    ★ 这是"DSH 思考后再发出"的落地动作：
+    文本来自你的推理，不是模板。
+    """
+    from core.dm import MAX_DM_CHARS, dm_reply_allowed
+    from core.dm_live import reply_to
+
+    body = (text or "").strip()
+    if not body:
+        return R.fail(R.INVALID_ARGUMENT, "text 不能为空")
+    if len(body) > MAX_DM_CHARS:
+        return R.fail(
+            R.INVALID_ARGUMENT, f"正文 {len(body)} 字，超过上限 {MAX_DM_CHARS}"
+        )
+
+    try:
+        runtime = await get_runtime()
+    except ConfigError as exc:
+        return R.fail(R.NOT_CONFIGURED, str(exc))
+
+    allowed, reason = dm_reply_allowed(runtime.config)
+    if not allowed:
+        return R.fail(R.BLOCKED, f"私信门禁拒绝：{reason}")
+
+    bundle = await _load_cookie_bundle()
+    if bundle is None:
+        return R.fail(R.AUTH_REQUIRED, "没有可用凭据（需重新扫码登录）")
+
+    ok, message = await reply_to(
+        db=runtime.db,
+        config=runtime.config,
+        cookies=bundle,
+        msg_seqno=int(msg_seqno),
+        text=body,
+    )
+    if not ok:
+        return R.fail(R.BLOCKED, message)
+
+    # 标记 inbox 已处理（与 dm_replies 双重保险）
+    runtime.db.execute(
+        "UPDATE dm_inbox SET status = 'answered' WHERE msg_seqno = ?",
+        (int(msg_seqno),),
+    )
+    return R.ok({"msg_seqno": int(msg_seqno), "message": message, "chars": len(body)})
+
+
+async def _load_cookie_bundle() -> Any:
+    """取一份 CookieBundle（失败返回 None）。"""
+    try:
+        from core.credentials import CredentialError, load_cookie
+
+        return load_cookie()
+    except CredentialError:
+        return None
+    except Exception:  # noqa: BLE001 —— 凭据读不到不该炸整个工具
+        return None
+
+
+@server.tool(
     name="web_search",
     description=(
         "**免费联网搜索**（只读，无需 API Key）。用于核实 B站 视频里的说法、"
