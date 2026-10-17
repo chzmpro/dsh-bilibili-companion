@@ -270,13 +270,22 @@ async def send_to_owner(
 
     # ★ 2026-10-17 实测结论：B站 **web 端** `send_msg` 只接受 `msg_type=1`。
     #
-    #   卡片（`msg_type=6` / `7`）在此接口上一律返回 `-400 请求错误`，
-    #   换过 `source` 0/1/2/5、`id` 字符串/int、带 content 字段等全部形态，
-    #   而同样请求下 `msg_type=1` 返回 `code=0 OK`。
-    #   ⇒ 这是**平台侧限制**，不是参数写错（详见 docs/dm-share-card.md）。
+    #   证据链（三层）：
+    #   1. **参数层**：卡片（`msg_type=6`/`7`）在此接口上一律 `-400`，
+    #      换过 `source` 0/1/2/5、`id` 字符串/int、带 content 字段等全部形态；
+    #   2. **签名层**（决定性）：在浏览器里抓包拿到网页版真实的 WBI 签名方式
+    #      （签的是 URL 上 `w_sender_uid`/`w_receiver_id`/`w_dev_id`/`statistics`
+    #      这 4 个参数，**不是**整个 body），用同一份 query + 同一份 body：
+    #        · `msg_type=1` → `code=0 OK`
+    #        · `msg_type=7` → `-400`
+    #      **唯一差别就是 msg_type** ⇒ 不是参数错、不是缺签名；
+    #   3. **UI 层**：PC 网页版视频分享面板只有「动态/微信/QQ/QQ空间/微博/贴吧/
+    #      嵌入代码」，**没有「私信」** ⇒ 卡片走的是 **App 接口**
+    #      （appkey + access_key 签名，另一套凭据）。
     #
-    #   所以 `share_bvid` 的行为是：**先按卡片尝试一次**（将来若放开就直接生效），
+    #   ⇒ 所以 `share_bvid` 的行为是：**先按卡片尝试一次**（将来若放开就直接生效），
     #   遇到 `-400` 再**自动降级**为排版好的文本 —— 而不是让你收到一个报错。
+    #   详见 docs/dm-share-card.md。
     bvid = share_bvid.strip()
     use_card = bool(bvid)
     if use_card:
