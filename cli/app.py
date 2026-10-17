@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -596,6 +597,105 @@ def dm_poll(
     finally:
         db.close()
     raise typer.Exit(code=code)
+
+
+@app.command("dm-watch")
+def dm_watch(
+    port: int = typer.Option(8848, "--port", help="面板端口"),
+    interval: int = typer.Option(60, "--interval", help="多少秒查一次未读"),
+    reply: bool = typer.Option(
+        False, "--reply", help="开启**自动回复**（默认只观察，不发送）"
+    ),
+    text: str = typer.Option("", "--text", help="自动回复的固定话术（留空用默认）"),
+    autostart: bool = typer.Option(
+        True, "--autostart/--no-autostart", help="打开面板就自动开始监听"
+    ),
+) -> None:
+    """**常驻私信监听 + 单页面板**（仿 `bilibili_learning_bot` 形态）。
+
+    ★ 为什么需要它 —— 结构性差距（对比参考项目源码后确认）：
+
+    `bilibili_learning_bot` 能"及时回复"，靠的是**一个常驻进程**
+    （`subprocess.Popen([sys.executable, "-m", "brain.monitor"])`，
+    内部 `while self.running` 无限轮询）。
+
+    而本项目是 **DSH 插件 + 对话**形态 —— 只在用户说话时醒，
+    MCP 的 22 个工具里没有任何"监听"能力。
+
+    ⇒ 这个命令就是那个**不属于对话的常驻进程**。
+
+    ⚠️ 关掉这个窗口，监听就停（与参考项目一样，没有服务在跑就收不到消息）。
+
+    ★ 默认**只观察不回复**：自动回复说错话比晚回一会儿更糟。
+    确认能及时收到后，再加 ``--reply``。
+    """
+    _configure_stdio()
+    import asyncio
+
+    from core.credentials import CredentialError, load_cookie
+    from core.dm_panel import serve
+    from core.dm_watch import DmWatcher
+
+    config = _load_config()
+    from core.dm import dm_reply_allowed
+
+    allowed, reason = dm_reply_allowed(config)
+    if not allowed:
+        typer.secho(f"私信门禁拒绝：{reason}", fg=typer.colors.RED, err=True)
+        typer.echo("提示：私信由 interaction.dm_reply_enabled 单独控制。")
+        raise typer.Exit(code=1)
+
+    if reply:
+        typer.echo("⚠️ 已开启**自动回复** —— 会自动给你的私信发消息。")
+    else:
+        typer.echo("（观察模式：只记录发现的消息，**不发送**任何内容）")
+
+    try:
+        bundle = load_cookie()
+    except CredentialError as exc:
+        typer.secho(f"没有可用凭据：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=3) from exc
+
+    db = _open_db()
+    db.migrate()
+    from core.ratelimit import RequestQueue
+
+    queue = RequestQueue(db=db, config=config)
+
+    # ★ 监听跑在**后台线程**，而 sqlite 连接不能跨线程复用
+    #   ⇒ 传 db_factory，让那个线程自己建连接（不要共享下面这个 db）。
+    def _make_db() -> Any:
+        from core.storage import Database as _Db
+
+        return _Db()
+
+    # ★ RequestQueue 内部也持有 db（记健康状态要写库）⇒ 必须一起重建
+    def _make_queue(thread_db: Any) -> Any:
+        from core.ratelimit import RequestQueue as _Q
+
+        return _Q(db=thread_db, config=config)
+
+    watcher = DmWatcher(
+        db=db,
+        config=config,
+        queue=queue,
+        cookies=bundle,
+        interval=interval,
+        auto_reply=reply,
+        reply_text=text,
+        db_factory=_make_db,
+        queue_factory=_make_queue,
+    )
+
+    try:
+        serve(watcher, port=port, autostart=autostart)
+    finally:
+        # 收摊：关掉共享的 http 客户端，避免端口/handle 泄漏
+        with contextlib.suppress(Exception):
+            watcher.close()
+        with contextlib.suppress(Exception):
+            asyncio.run(queue.aclose())
+        db.close()
 
 
 @app.command("evolve")
