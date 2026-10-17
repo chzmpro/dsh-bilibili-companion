@@ -37,7 +37,7 @@ PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():  # pragma: no cover - 非 Windows
     PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
 
-#: ★ 21 个工具 = 任务书 §4 的 14 个 + 主人 2026-10-15 要求新增的 3 个
+#: ★ 22 个工具 = 任务书 §4 的 14 个 + 主人 2026-10-15 要求新增的 3 个
 #: + 2026-10-17 新增的 2 个搜索方式工具（expand_intent / trends_suggest）：
 #: ``like_video`` / ``favorite_video``（任务书漏了点赞收藏）
 #: 与 ``owner_preferences``（跨对话持久的主人偏好）。
@@ -69,6 +69,8 @@ EXPECTED_TOOLS = {
     # —— 2026-10-17：私信闭环（视频 → 仓库 → 读源码）——
     "find_repo",
     "read_source",
+    # —— 2026-10-17：免费联网搜索（主人要的"免费互联网搜索"）——
+    "web_search",
 }
 
 #: 人用入口**绝不能**出现在模型可见的工具列表里（任务书 §3）
@@ -120,13 +122,13 @@ def data_dir(isolated_data_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-async def test_server_starts_and_lists_all_21_tools(data_dir: Path) -> None:
+async def test_server_starts_and_lists_all_22_tools(data_dir: Path) -> None:
     """★ 任务书 §7 任务 2 验收：工具能在协议层被枚举出来。"""
     async with mcp_session(data_dir) as session:
         listed = await session.list_tools()
         names = {tool.name for tool in listed.tools}
     assert names == EXPECTED_TOOLS, f"工具集合不符，差异：{names ^ EXPECTED_TOOLS}"
-    assert len(names) == 21
+    assert len(names) == 22
 
 
 async def test_tools_have_descriptions(data_dir: Path) -> None:
