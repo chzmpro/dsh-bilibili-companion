@@ -91,6 +91,37 @@ _CODE_TABLE: dict[str, Classification] = {
     "-404": Classification(
         NOT_FOUND, False, False, "not_found", "该资源不存在（已删/关闭），跳过即可，不影响其它请求"
     ),
+    # ★★★ 稿件级错误（2026-10-18 真机踩到，代价：整批 72 条被误停）
+    #
+    # 实测 `62002` 的 message 是 **"稿件不可见"** —— 那条视频被 UP 删了/
+    # 设为私密/地区限制，**跟账号风控毫无关系**。
+    #
+    # 但原来它不在表里 ⇒ 落到 `unknown_code_{n}` ⇒ 判定 `PLATFORM_ERROR` +
+    # "停机调查" ⇒ 之后**所有**请求被 `RequestsBlocked` 拦下。
+    # 结果：一条已删视频把整批 75 条的补抓全停了，还误报成"账号风控"。
+    #
+    # ⇒ 和 `-404` 一样处理：**单条确定性失败，不重试、不阻断其它请求**。
+    "62002": Classification(
+        NOT_FOUND,
+        False,
+        False,
+        "video_unavailable",
+        "稿件不可见（已删/私密/地区限制），跳过该条即可，不影响其它请求",
+    ),
+    "62004": Classification(
+        NOT_FOUND,
+        False,
+        False,
+        "video_under_review",
+        "稿件审核中，暂时不可见，跳过该条即可",
+    ),
+    "62012": Classification(
+        NOT_FOUND,
+        False,
+        False,
+        "video_private",
+        "仅 UP 主自己可见，跳过该条即可",
+    ),
     "-412": Classification(
         PLATFORM_ERROR,
         False,

@@ -59,6 +59,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import load_config  # noqa: E402
+from core.context_pack import build_focus  # noqa: E402
 from core.storage import Database  # noqa: E402
 from core.text_worker import TextWorker  # noqa: E402
 
@@ -155,7 +156,11 @@ def _evidence(db: Database, bvid: str) -> list[dict[str, Any]]:
 
 
 async def rescore_all(
-    db: Database, worker: TextWorker, targets: list[dict[str, Any]]
+    db: Database,
+    worker: TextWorker,
+    targets: list[dict[str, Any]],
+    *,
+    focus: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """逐个重算（**串行**，避免并发打爆豆包/被限流）。"""
     results: list[dict[str, Any]] = []
@@ -174,6 +179,10 @@ async def rescore_all(
                 source_url=target["source_url"],
                 evidence_level="subtitle" if len(blocks) > 1 else "description",
                 evidence_blocks=blocks,
+                # ★ 必须传关注点：不传的话模型只知道标题和证据，
+                #   不知道"对谁有用"，只能按内容充实度打分
+                #   —— 这正是主人反馈"没什么用却高分"的根因。
+                focus=focus,
             )
         except Exception as exc:  # noqa: BLE001 —— 单条失败不该中断整批
             print(f" ❌ {type(exc).__name__}")
@@ -328,8 +337,16 @@ async def main() -> int:
         print(f"无证据（从没读过）无法评分：{no_evidence} 条")
         print()
 
+        # 主人的关注点（关键词 + 偏好规则）—— 打分前必须先取到
+        focus = build_focus(db, config)
+        print(
+            f"关注点：关键词 {len(focus['keywords'])} 个 "
+            f"（{'、'.join(focus['keywords'][:3])}）| "
+            f"规则 {len(focus['rules'])} 条"
+        )
+
         started = time.time()
-        results = await rescore_all(db, worker, targets)
+        results = await rescore_all(db, worker, targets, focus=focus)
         elapsed = time.time() - started
         print(f"\n耗时 {elapsed:.1f} 秒")
 

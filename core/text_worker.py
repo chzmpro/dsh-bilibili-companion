@@ -34,7 +34,14 @@ import httpx
 from core.secrets import resolve_secret
 from core.storage import Database
 
-PROMPT_VERSION = "v2"
+#: 提示词/评分契约版本。**改了评分 rubric 或传给模型的输入就必须 bump**。
+#:
+#: ★ 为什么（2026-10-18 踩到）：缓存键是
+#:   `{bvid}|{input_sha256}|{model_id}|{prompt_version}`
+#:   —— 而 `input_sha256` 只算**证据文本**，**不含 focus**。
+#:   于是"加了 focus 重新打分"会命中旧缓存，看起来重算了其实用的是旧结果。
+#: ⇒ v3：`focus`（主人的关注点）进入打分上下文。
+PROMPT_VERSION = "v3"
 
 #: 打分维度的权重（**总分由代码算，不由模型编**）。
 #:
