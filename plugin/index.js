@@ -59,6 +59,8 @@ const CONFIG_DEFAULTS = Object.freeze({
   watchPort: 8848,
   watchInterval: 60,
   watchAutoReply: false,
+  // ★ 值班员会话 id（用户手动开的那个会话；投递只允许投给它）
+  watchSessionId: '',
 })
 
 // ---------------------------------------------------------------------------
@@ -102,6 +104,8 @@ function normalizeConfig(src, base) {
     out.watchInterval = watchInterval
   }
   if (typeof src.watchAutoReply === 'boolean') out.watchAutoReply = src.watchAutoReply
+  // 值班员会话 id（投递目标，白名单）
+  if (typeof src.watchSessionId === 'string') out.watchSessionId = src.watchSessionId.trim()
 
   if (Array.isArray(src.keywords)) {
     out.keywords = src.keywords
@@ -338,6 +342,9 @@ function applyInner(ctx, config) {
   const serviceProbe = {
     agentsService: false,
     agentsMethods: [],
+    agentCount: null,
+    agentShape: null,
+    listError: '',
     error: '',
   }
 
@@ -492,8 +499,81 @@ function applyInner(ctx, config) {
           fields: readEditableSafe(cfg),
         })
       }
+      // ---- 把一条消息**投递**给已存在的会话（2026-10-17）----------------
+      //
+      // 主人：「难道不能我自己专门开个会话给你用吗，非得你自己调用呢」
+      //
+      // ★ 这是比 createAgent 更好的路：
+      //   用户手动开一个"值班员"会话，它的 agent 一直活着；
+      //   我们只调 `agent.followup(...)` 把私信投进去 —— **零冷启动**，
+      //   而且那个会话带着完整上下文，用户还能看见它在思考。
+      //
+      // ⚠️ 安全：只允许投给**配置里白名单**的会话，绝不投给别的
+      //   （投错会把消息插进用户正在用的对话）。
+      if (method === 'POST' && route === '/deliver') {
+        const body = await readBody(req)
+        const sessionId = String(body?.sessionId || cfg.watchSessionId || '')
+        const text = String(body?.text || '').trim()
+        if (!text) return sendJson(res, 400, { ok: false, error: 'text 不能为空' })
+        if (!sessionId) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: '没有配置 watchSessionId（值班员会话 id），拒绝投递',
+          })
+        }
+        const allow = cfg.watchSessionId
+        if (allow && sessionId !== allow) {
+          return sendJson(res, 403, {
+            ok: false,
+            error: `拒绝投递：只允许 ${allow}，收到 ${sessionId}`,
+          })
+        }
+        const agents = serviceProbe._agents
+        if (!agents) {
+          return sendJson(res, 503, { ok: false, error: 'agents 服务还没就绪' })
+        }
+        try {
+          const agent = agents.get(sessionId)
+          if (!agent) {
+            return sendJson(res, 404, {
+              ok: false,
+              error: `找不到会话 ${sessionId}（是不是关了？）`,
+            })
+          }
+          agent.followup({
+            content: [{ type: 'text', text }],
+            source: { kind: 'user' },
+          })
+          logger.info?.(`bili-companion: 已投递到 ${sessionId.slice(-8)}`)
+          return sendJson(res, 200, { ok: true, delivered: true, sessionId })
+        } catch (error) {
+          return sendJson(res, 500, {
+            ok: false,
+            error: String(error?.message ?? error),
+          })
+        }
+      }
+
       if (method === 'GET' && route === '/probe') {
-        return sendJson(res, 200, { ok: true, ...serviceProbe })
+        // ★ 动态探测：每次请求都重新列一遍（用户开着会话时才有 agent）
+        const live = { ...serviceProbe }
+        delete live._agents
+        try {
+          const agents = serviceProbe._agents
+          if (agents && typeof agents.list === 'function') {
+            const list = agents.list()
+            live.agentCount = Array.isArray(list) ? list.length : 0
+            live.agents = (Array.isArray(list) ? list : []).map((agent) => ({
+              id: agent?.id ? String(agent.id).slice(0, 60) : null,
+              methods: Object.getOwnPropertyNames(Object.getPrototypeOf(agent))
+                .filter((k) => typeof k === 'string' && !k.startsWith('_'))
+                .sort(),
+            }))
+          }
+        } catch (error) {
+          live.liveError = String(error?.message ?? error)
+        }
+        return sendJson(res, 200, { ok: true, ...live })
       }
       if (route === '/watch') {
         if (method === 'GET') {
@@ -530,18 +610,64 @@ function applyInner(ctx, config) {
   // 如果插件能 inject 到它，就能**进程内**驱动思考 —— 没有 20 秒冷启动。
   //
   // 这里只做**只读探测**：拿到没有、有哪些方法。不发消息、不建会话。
+  // ★ 同时探测 agentLoop —— `createAgent` 在这个服务里（不在 agents 里）
+  ctx.inject(['agentLoop'], (scoped) => {
+    try {
+      const loop = scoped.agentLoop
+      serviceProbe.agentLoopService = Boolean(loop)
+      if (loop) {
+        serviceProbe.agentLoopMethods = Object.getOwnPropertyNames(
+          Object.getPrototypeOf(loop),
+        )
+          .filter((key) => typeof key === 'string' && !key.startsWith('_'))
+          .sort()
+      }
+      logger.info?.(
+        `bili-companion: agentLoop 已拿到（${serviceProbe.agentLoopMethods.length} 个方法）`,
+      )
+    } catch (error) {
+      serviceProbe.agentLoopError = String(error?.message ?? error)
+      logger.warn?.(`bili-companion: 探测 agentLoop 失败 ${serviceProbe.agentLoopError}`)
+    }
+  })
+
   ctx.inject(['agents'], (scoped) => {
     try {
       const agents = scoped.agents
       serviceProbe.agentsService = Boolean(agents)
+      // ★ 存下来，供 /probe **动态**查询（apply 时 agentCount 一定是 0，
+      //   因为那会儿用户还没开会话）
+      serviceProbe._agents = agents
       if (agents) {
         const proto = Object.getPrototypeOf(agents)
         serviceProbe.agentsMethods = Object.getOwnPropertyNames(proto)
           .filter((key) => typeof key === 'string' && !key.startsWith('_'))
           .sort()
       }
+      // ★ 进一步：列出现有 agent 实例，并看单个 agent 能用什么
+      try {
+        const roots = typeof agents.list === 'function' ? agents.list() : []
+        if (Array.isArray(roots)) {
+          serviceProbe.agentCount = roots.length
+          const first = roots[0]
+          if (first) {
+            serviceProbe.agentShape = {
+              hasId: typeof first.id !== 'undefined',
+              id: first.id ? String(first.id).slice(0, 40) : null,
+              methods: Object.getOwnPropertyNames(Object.getPrototypeOf(first))
+                .filter((k) => typeof k === 'string' && !k.startsWith('_'))
+                .sort()
+                .slice(0, 40),
+            }
+          }
+        }
+      } catch (error) {
+        serviceProbe.listError = String(error?.message ?? error)
+      }
+
       logger.info?.(
-        `bili-companion: agents 服务已拿到（${serviceProbe.agentsMethods.length} 个方法）`,
+        `bili-companion: agents 服务已拿到（${serviceProbe.agentsMethods.length} 个方法，` +
+          `${serviceProbe.agentCount ?? 0} 个实例）`,
       )
     } catch (error) {
       serviceProbe.error = String(error?.message ?? error)
