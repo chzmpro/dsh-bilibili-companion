@@ -7,7 +7,7 @@
 
 | 真机踩到的 | 这里的防线 |
 |---|---|
-| 短名 vs 完整路径混用（`score_topic_weight` / `discovery.score_topic_weight`） | 归一化测试 + 映射完整性测试 |
+| 短名/完整路径混用（`score_topic_weight` vs `discovery.*`） | 归一化 + 映射完整性 |
 | 每日限额靠内存计数 → 重启就失效 | 计数查**库**，测"跨重启仍生效" |
 | 写盘把 config.yaml 注释吃掉 | 测"注释行数不变" |
 | AI 能把自己提的提案批了 | 测"`decided_by` 非 cli 时拒绝" |
@@ -31,7 +31,6 @@ import pytest
 from core import evolution, evolution_store
 from core.evolution import EvolutionError
 from core.storage import Database
-
 
 # ---------------------------------------------------------------------------
 # ★★ 短名 / 完整路径归一化（真机栽在这上面）
