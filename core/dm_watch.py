@@ -63,6 +63,16 @@ DEFAULT_INTERVAL_SECONDS = 60
 #: 单轮最多处理几条新消息（防止一次刷屏式回复）。
 MAX_PER_ROUND = 3
 
+#: 监听启动后**多少秒内不投递**（默认 60）。
+#:
+#: ★ 主人要求：「让重启DSH后的插件投递慢一点，比如过1分钟再开始，
+#:   免得我还没打开会话就已经投递了」
+#:
+#: 投递需要值班员会话**已经激活**（在内存里）**并且选过模型**
+#: （否则 prompt 里 `{{model}}` 解析不到，每轮都报 error）。
+#: 所以刚重启时先等一会儿，别急着投。
+DEFAULT_DELIVER_DELAY_SECONDS = 60
+
 #: 自动回复的**固定话术**（还没接豆包时的兜底）。
 #:
 #: ⚠️ 刻意简短：长篇自动回复最容易"说错话"。
@@ -159,6 +169,7 @@ class DmWatcher:
         auto_reply: bool = False,
         reply_text: str = "",
         reply_factory: Any = None,
+        deliver_delay_seconds: int = DEFAULT_DELIVER_DELAY_SECONDS,
         db_factory: Any = None,
         queue_factory: Any = None,
     ) -> None:
@@ -203,6 +214,9 @@ class DmWatcher:
         #: ★ 不传时**自动用豆包**（主人选的方案 A）——
         #: 因为常驻进程只能调豆包（DSH 的 key 拿不到，见 dm_reply_gen 的说明）。
         self.reply_factory = reply_factory or self._doubao_factory
+        #: 启动后多久内不投递（给用户时间打开值班员会话）
+        self.deliver_delay_seconds = max(0, int(deliver_delay_seconds))
+        self._started_at = time.time()
         self.stats = WatchStats()
         self._stop = False
 
@@ -331,6 +345,12 @@ class DmWatcher:
             #   那个 agent 自己思考、自己调 dm_reply，不用起新进程。
             await self._deliver_to_duty(outcome.new_messages[-1])
 
+        # ★ 补投：本轮没发现新消息时，看看有没有**上次没投出去**的
+        if not found:
+            waiting = self._undelivered()
+            if waiting is not None:
+                await self._deliver_to_duty(waiting)
+
         replied = 0
         if found and self.auto_reply:
             allowed, reason = dm_reply_allowed(self.config)
@@ -364,6 +384,51 @@ class DmWatcher:
             "skipped": outcome.skipped,
         }
 
+    def _undelivered(self) -> dict[str, Any] | None:
+        """取一条**还没成功投递**的待回复私信（最新的一条）。
+
+        ★ 为什么需要"补投"：投递可能因为
+          ① 刚启动的静默期、② 值班员会话还没激活、③ 没选模型 而失败。
+        原来只有 `found`（新消息）才触发投递 ⇒ **失败一次就永远不投了**。
+        有了 `delivered_at IS NULL` 这个条件，每轮都能补上。
+
+        Returns:
+            一条消息 dict（含 msg_seqno/text/title），没有就 None。
+        """
+        try:
+            row = self._handle().query_one(
+                "SELECT msg_seqno, text, title FROM dm_inbox "
+                "WHERE status = 'pending' AND delivered_at IS NULL "
+                "ORDER BY received_at DESC LIMIT 1"
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if row is None:
+            return None
+        return {
+            "msg_seqno": int(row["msg_seqno"]),
+            "text": str(row["text"] or ""),
+            "title": str(row["title"] or ""),
+        }
+
+    def _duty_session_id(self) -> str:
+        """取值班员会话 id（从**插件的** config.json 读）。
+
+        ★ 为什么不放项目自己的 config.yaml：那个文件是"小号行为配置"
+        （关键词/评分/配额），而值班员会话是**DSH 插件**的概念，
+        归 `$DSH_HOME/bili-companion/config.json` 管。
+        这里只**读**它，不写 —— 写由插件的 /config 接口负责。
+
+        ★ 插件侧也有白名单（`watchSessionId`，/deliver 会再校验一次），
+        两边都限制，防止投错会话污染用户正在用的对话。
+        """
+        try:
+            from core.dm_deliver import read_plugin_config
+
+            return str(read_plugin_config().get("watchSessionId") or "")
+        except Exception:  # noqa: BLE001 —— 读不到就当没配置
+            return ""
+
     async def _deliver_to_duty(self, message: dict[str, Any]) -> bool:
         """把新私信**投递**给值班员会话（失败不影响主流程）。
 
@@ -377,6 +442,32 @@ class DmWatcher:
         text = str(message.get("text") or "").strip()
         if not text:
             return False
+
+        # ---- 保护 1：启动后静默期内不投递 --------------------------------
+        # 主人要求：刚重启 DSH 时别急着投，等他打开会话。
+        elapsed = time.time() - self._started_at
+        if elapsed < self.deliver_delay_seconds:
+            wait = int(self.deliver_delay_seconds - elapsed)
+            self.stats.add(
+                "skipped", f"投递静默期（还差 {wait} 秒），先攒着不投"
+            )
+            return False
+
+        # ---- 保护 2：会话必须**活着** -----------------------------------
+        # `agents.get()` 只找内存里的活 agent。DSH 刚重启时它不在 ⇒ 投了也白投。
+        try:
+            from core.dm_deliver import is_session_alive
+
+            session_id = self._duty_session_id()
+            if session_id and not is_session_alive(session_id):
+                self.stats.add(
+                    "skipped", "值班员会话还没激活（请在 DSH 里打开它），先攒着"
+                )
+                return False
+        except Exception as exc:  # noqa: BLE001 —— 探测失败也先别投
+            self.stats.add("skipped", f"探测会话失败：{type(exc).__name__}")
+            return False
+
         title = str(message.get("title") or "").strip()
         if title:
             text = f"{text}（分享视频：{title}）"
@@ -391,6 +482,15 @@ class DmWatcher:
 
             result = await deliver_async(prompt)
             if result.ok and result.delivered:
+                # ★ 标记已投递：防止下一轮重复投同一条
+                seqno = int(message.get("msg_seqno") or 0)
+                if seqno > 0:
+                    # 标记失败不该影响投递结果
+                    with contextlib.suppress(Exception):
+                        self._handle().execute(
+                            "UPDATE dm_inbox SET delivered_at = ? WHERE msg_seqno = ?",
+                            (int(time.time()), seqno),
+                        )
                 self.stats.add("delivered", f"已投递给值班员（{result.session_id[-8:]}）")
                 return True
             self.stats.add(

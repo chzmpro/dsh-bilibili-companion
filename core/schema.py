@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -521,6 +521,28 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         CREATE INDEX IF NOT EXISTS idx_dm_inbox_status
             ON dm_inbox(status, received_at DESC);
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v11 —— dm_inbox 加 delivered_at（2026-10-17）
+    # ------------------------------------------------------------------
+    #
+    # 主人：「让重启DSH后的插件投递慢一点…免得我还没打开会话就已经投递了」
+    #
+    # ★ 为什么需要这一列：
+    #   投递可能失败（DSH 刚重启、值班员会话还没激活、没选模型）。
+    #   原来只有 `found`（新消息）才触发投递 ⇒ **失败一次就永远不投了**。
+    #
+    #   有了 `delivered_at`：
+    #     NULL  = 还没成功投递 ⇒ 每轮都可以补投
+    #     有值  = 已投递过   ⇒ 不重复投
+    #
+    #   ★ 为什么不改 `status` 的 CHECK：SQLite 改 CHECK 要重建表，
+    #     风险远大于加一列。加列只影响一个 NULL 默认值。
+    (
+        11,
+        """
+        ALTER TABLE dm_inbox ADD COLUMN delivered_at INTEGER;
         """,
     ),
 )

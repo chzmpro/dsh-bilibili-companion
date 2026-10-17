@@ -610,6 +610,11 @@ def dm_watch(
     autostart: bool = typer.Option(
         True, "--autostart/--no-autostart", help="打开面板就自动开始监听"
     ),
+    deliver_delay: int = typer.Option(
+        60,
+        "--deliver-delay",
+        help="启动后多少秒内**不投递**（给主人时间打开值班员会话）",
+    ),
 ) -> None:
     """**常驻私信监听 + 单页面板**（仿 `bilibili_learning_bot` 形态）。
 
@@ -683,6 +688,7 @@ def dm_watch(
         interval=interval,
         auto_reply=reply,
         reply_text=text,
+        deliver_delay_seconds=deliver_delay,
         db_factory=_make_db,
         queue_factory=_make_queue,
     )

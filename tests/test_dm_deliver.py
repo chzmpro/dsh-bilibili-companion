@@ -231,3 +231,69 @@ def test_paths_are_under_our_prefix() -> None:
     """路径必须在 `/api/bili-companion/` 下（不要撞别的插件）。"""
     assert PROBE_PATH.startswith("/api/bili-companion/")
     assert DELIVER_PATH.startswith("/api/bili-companion/")
+
+
+# ---------------------------------------------------------------------------
+# ★ 会话存活检查（2026-10-17：主人要求"别在我还没打开会话时就投递"）
+# ---------------------------------------------------------------------------
+
+
+def test_is_session_alive_empty_id() -> None:
+    assert dm_deliver.is_session_alive("") is False
+
+
+def test_is_session_alive_requires_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★★ 只有**在内存里**的 agent 才算活。
+
+    DSH 重启后值班员会话不在内存 ⇒ 投了也会失败
+    （甚至 resume 出来的缺 {{model}}，每轮报 error）。
+    """
+    monkeypatch.setattr(dm_deliver, "discover_port", lambda force=False: 43129)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kw: _FakeResponse(
+            200, {"ok": True, "agentsService": True, "agents": []}
+        ),
+    )
+    assert dm_deliver.is_session_alive("session-x") is False
+
+
+def test_is_session_alive_finds_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dm_deliver, "discover_port", lambda force=False: 43129)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kw: _FakeResponse(
+            200, {"ok": True, "agents": [{"id": "session-x"}, {"id": "session-y"}]}
+        ),
+    )
+    assert dm_deliver.is_session_alive("session-x") is True
+    assert dm_deliver.is_session_alive("session-z") is False
+
+
+def test_is_session_alive_handles_bad_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dm_deliver, "discover_port", lambda force=False: 43129)
+    monkeypatch.setattr(
+        httpx, "get", lambda url, **kw: _FakeResponse(200, {"ok": True})
+    )
+    assert dm_deliver.is_session_alive("session-x") is False
+
+
+def test_read_plugin_config_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        dm_deliver, "plugin_config_path", lambda: Path(str(tmp_path)) / "nope.json"
+    )
+    assert dm_deliver.read_plugin_config() == {}
+
+
+def test_read_plugin_config_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    import json as _json
+    from pathlib import Path
+
+    cfg = Path(str(tmp_path)) / "config.json"
+    cfg.write_text(_json.dumps({"watchSessionId": "session-x"}), encoding="utf-8")
+    monkeypatch.setattr(dm_deliver, "plugin_config_path", lambda: cfg)
+    assert dm_deliver.read_plugin_config()["watchSessionId"] == "session-x"

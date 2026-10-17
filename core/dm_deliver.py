@@ -40,6 +40,7 @@ import json
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -155,6 +156,69 @@ def discover_port(*, force: bool = False) -> int | None:
 
     _PORT_CACHE.update({"port": None, "at": now})
     return None
+
+
+#: 插件配置路径（插件写在 `$DSH_HOME/bili-companion/config.json`）。
+def plugin_config_path() -> Path:
+    """插件配置文件的路径（跨平台：用 DSH_HOME 或 %APPDATA%）。"""
+    import os
+
+    home = os.environ.get("DSH_HOME", "").strip()
+    if home:
+        return Path(home) / "bili-companion" / "config.json"
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / "dsh-desktop" / "harness" / "bili-companion" / "config.json"
+    return Path.home() / ".dsh" / "bili-companion" / "config.json"
+
+
+def read_plugin_config() -> dict[str, Any]:
+    """读插件的 config.json（**只读**，失败返回空 dict）。"""
+    import json as _json
+
+    try:
+        path = plugin_config_path()
+        if not path.is_file():
+            return {}
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def is_session_alive(session_id: str, *, timeout: float = 5) -> bool:
+    """检查值班员会话现在是不是**活 agent**（在内存里）。
+
+    ★ 为什么必须先查：`agents.get()` 只找内存里的活 agent。
+    DSH 重启后、或用户没打开那个会话时，它不在内存里，
+    这时投递会失败（甚至 resume 出来的会话缺 model 上下文）。
+
+    ★ 还需要用户**在界面上选过模型**（`model/selection` 事件），
+    否则 prompt 里的 `{{model}}` 解析不到，每轮都会报：
+        prompt variable "{{model}}" has no value
+
+    Returns:
+        True = 会话现在是活的，可以投递。
+    """
+    if not session_id:
+        return False
+    port = discover_port()
+    if port is None:
+        return False
+    try:
+        response = httpx.get(
+            f"http://127.0.0.1:{port}{PROBE_PATH}", timeout=timeout, trust_env=False
+        )
+        if response.status_code != 200:
+            return False
+        body = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+
+    agents = body.get("agents")
+    if not isinstance(agents, list):
+        return False
+    return any(str(item.get("id") or "") == session_id for item in agents if isinstance(item, dict))
 
 
 def deliver(text: str, *, session_id: str = "", timeout: float = 15) -> DeliverResult:
