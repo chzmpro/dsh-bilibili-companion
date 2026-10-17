@@ -116,6 +116,7 @@ window.__ModuleLoader__.load({
           'schedule.interval_minutes',
           'schedule.max_runs_per_day',
           'schedule.daily_time',
+          'schedule.timezone',
           'schedule.min_gap_minutes',
         ],
       },
@@ -176,6 +177,7 @@ window.__ModuleLoader__.load({
         defaultOpen: false,
         paths: [
           'text_worker.enabled',
+          'text_worker.provider',
           'text_worker.model',
           'text_worker.base_url',
           'text_worker.timeout_seconds',
@@ -185,6 +187,35 @@ window.__ModuleLoader__.load({
           'text_worker.max_excerpt_chars',
           'text_worker.asr_fallback',
           'text_worker.asr_model',
+        ],
+      },
+      {
+        // ★ 2026-10-17 新增：主人说"blb 的设置项有很多可以自己设置的，你怎么没有学习"
+        //   这两组全是**可调参**（快慢/容忍度/通知门槛），不含任何授权开关。
+        title: '网络与限速',
+        subtitle: '调快慢与容忍度（越大越保守）',
+        defaultOpen: false,
+        paths: [
+          'bilibili_requests.min_interval_seconds',
+          'bilibili_requests.max_read_retries',
+          'bilibili_requests.backoff_base_seconds',
+          'bilibili_requests.backoff_cap_seconds',
+          'bilibili_requests.max_consecutive_rate_limits',
+          'bilibili_requests.search_cache_ttl_seconds',
+          'bilibili_requests.metadata_cache_ttl_seconds',
+          'bilibili_requests.subtitle_cache_ttl_seconds',
+        ],
+      },
+      {
+        title: '日报与通知',
+        subtitle: '推什么、什么时候推、什么值得打扰你',
+        defaultOpen: false,
+        paths: [
+          'report.local_digest',
+          'report.push_times',
+          'report.mention_owner_on_high_value_comment',
+          'report.mention_like_threshold',
+          'report.share_like_threshold',
         ],
       },
     ]

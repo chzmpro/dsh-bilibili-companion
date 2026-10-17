@@ -23,6 +23,10 @@ discovery:
   max_candidates_per_run: 30 # curator 原值 max_candidates=30
   max_full_reads_per_run: 5 # curator 原值 max_items_per_run=5
   min_score_for_comment: 75
+  # ★ 打分权重：主题相关度（topic）占总分多少（0.5~0.95）
+  #   越高越只看「跟我有关」；越低越看内容质量本身。
+  #   实测 12 条样本：0.6→区分度+48.8，0.8→+55.5（默认）
+  score_topic_weight: 0.80
   # ★ 推荐流候选词**自动回填**关键词 —— 默认 false（要人审）。
   #   true = 候选词直接写进上面的 keywords，不用过目。
   #   ⚠️ 代价：推荐流是算法喂的，自动回填等于让**算法间接决定小号关注什么**。
@@ -73,7 +77,7 @@ text_worker:
   # ★ 本地 ASR 兜底（默认关）：字幕不可用的视频在本机转写一遍，**不花 API 钱**。
   #   开启前提：装 faster-whisper + yt-dlp（约 1 GB，含 Whisper 模型）。
   #   缺依赖不会让读取失败，只会记一条 ASR_NO_DEPENDENCY。
-  asr_fallback: false
+  asr_fallback: true
   asr_model: "small" # tiny / base / small / medium
 
 schedule:

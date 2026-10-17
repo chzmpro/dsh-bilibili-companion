@@ -380,11 +380,21 @@ ok(slots.includes('settings.section'), '浏览器半身往 settings.section 插�
 //    完整渲染用 `render-smoke.mjs`（先跑 `extract-react-for-smoke.sh`）。
 {
   const clientSrc = readFileSync(join(here, 'client.js'), 'utf8')
+  // ★ 前缀**从白名单自动推导**，不要硬编码。
+  //
+  //   2026-10-17 踩到：这里原本写死
+  //   `(?:schedule|discovery|interaction|persona|text_worker)`，
+  //   于是新增 `bilibili_requests.*` / `report.*` 两组时，
+  //   即使 client.js 里**真的**加了控件，这个正则也匹配不到 ⇒ 误报"未展示"。
+  //   ⇒ 改成从 EDITABLE_KEYS 取顶层段名，以后加新段不会再漏。
+  const sections = [
+    ...new Set(Object.keys(EDITABLE_KEYS).map((key) => key.split('.')[0])),
+  ].sort()
   const referenced = [
     ...new Set(
       [
         ...clientSrc.matchAll(
-          /'((?:schedule|discovery|interaction|persona|text_worker)\.[A-Za-z0-9_]+)'/g,
+          new RegExp(`'((?:${sections.join('|')})\\.[A-Za-z0-9_]+)'`, 'g'),
         ),
       ].map((m) => m[1]),
     ),

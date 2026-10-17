@@ -65,6 +65,7 @@ export const EDITABLE_KEYS = Object.freeze({
     note: '唤醒方式：打开 DSH / 每日固定时刻 / 持续跑',
   },
   'schedule.daily_time': { type: 'str', note: '每日时刻（仅 daily 模式）' },
+  'schedule.timezone': { type: 'str', note: '时区（如 Asia/Shanghai）' },
   'schedule.min_gap_minutes': { type: 'int', note: '防抖：多久内不重复跑' },
   'schedule.peak_valley': { type: 'bool', note: '只在谷时跑（省钱）' },
   'schedule.interval_minutes': { type: 'int', note: '持续跑：两轮间隔（分钟）' },
@@ -86,6 +87,12 @@ export const EDITABLE_KEYS = Object.freeze({
 
   // ---- 豆包（文字 worker）------------------------------------------------
   'text_worker.enabled': { type: 'bool', note: '启用文字 worker（关了就只读不算）' },
+  // ⚠️ provider 在 core/config.py 里是**自由字符串**（默认 volcengine_ark），
+  //    不是枚举 —— 所以这里只能是 str，写成 choice 会漏掉合法值。
+  'text_worker.provider': {
+    type: 'str',
+    note: '接口类型（默认 volcengine_ark；OpenAI 兼容服务填对应名字）',
+  },
   'text_worker.model': { type: 'str', note: '模型名' },
   'text_worker.base_url': { type: 'str', note: '接口地址' },
   'text_worker.timeout_seconds': { type: 'float', note: '单次调用超时（秒）' },
@@ -117,6 +124,49 @@ export const EDITABLE_KEYS = Object.freeze({
   'persona.allow_follow': { type: 'bool', note: '允许关注' },
   'persona.allow_negative_feedback': { type: 'bool', note: '允许点踩' },
   'persona.max_items_per_run': { type: 'int', note: '每轮最多处理几条' },
+
+  // ---- 网络与限速（2026-10-17 新增）-------------------------------------
+  //
+  // ★ 为什么开放这几项：参考项目 `bilibili_learning_bot` 有 **391** 个配置项。
+  //   我们的原则是**只锁"授权"，开放"调参"** —— 这几项调的是快慢/容忍度，
+  //   最坏情况是变慢或更容易停机，**不会**变成乱发。
+  'bilibili_requests.min_interval_seconds': {
+    type: 'float',
+    note: '两次请求之间至少隔几秒（越大越保守）',
+  },
+  'bilibili_requests.max_read_retries': { type: 'int', note: '读请求失败重试几次' },
+  'bilibili_requests.backoff_base_seconds': { type: 'float', note: '退避基数（秒）' },
+  'bilibili_requests.backoff_cap_seconds': { type: 'float', note: '退避上限（秒）' },
+  'bilibili_requests.max_consecutive_rate_limits': {
+    type: 'int',
+    note: '连续限流几次就停机等人工',
+  },
+  'bilibili_requests.search_cache_ttl_seconds': {
+    type: 'int',
+    note: '搜索缓存多久算过期（秒）',
+  },
+  'bilibili_requests.metadata_cache_ttl_seconds': {
+    type: 'int',
+    note: '元数据缓存多久算过期（秒）',
+  },
+  'bilibili_requests.subtitle_cache_ttl_seconds': {
+    type: 'int',
+    note: '字幕缓存多久算过期（秒）',
+  },
+
+  // ---- 日报与通知（2026-10-17 新增）-------------------------------------
+  'report.local_digest': { type: 'bool', note: '是否写本地日报' },
+  'report.mention_owner_on_high_value_comment': {
+    type: 'bool',
+    note: '高质量评论是否 @ 主号',
+  },
+  'report.mention_like_threshold': { type: 'int', note: '@ 主号的点赞数门槛' },
+  // ⚠️ 校验：share_like_threshold 必须**小于** mention_like_threshold（config 里有断言）
+  'report.share_like_threshold': { type: 'int', note: '私信分享的点赞数门槛（须小于上一项）' },
+  'report.push_times': {
+    type: 'inline-list',
+    note: '推送时刻（逗号分隔，如 09:00,20:00）',
+  },
 })
 
 /**
