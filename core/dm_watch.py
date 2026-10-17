@@ -374,8 +374,21 @@ class DmWatcher:
              "title": str(m.get("title") or "")}
             for m in messages[:-1]
         ]
+        # ★ 带上项目上下文（主人要求：「没法给豆包塞上下文让他看懂浅层内容吗」）
+        context = ""
+        try:
+            from core.context_pack import build_context
+            from core.paths import data_dir
+
+            bundle = build_context(
+                self._handle(), digest_dir=data_dir() / "digests", data_dir=data_dir()
+            )
+            context = bundle.to_prompt()
+        except Exception:  # noqa: BLE001 —— 拿不到上下文也要能回（降级）
+            context = ""
+
         result = await generate_reply(
-            incoming=incoming, history=history, config=self.config
+            incoming=incoming, history=history, config=self.config, context=context
         )
         if not result.ok:
             raise RuntimeError(f"{result.error_code}: {result.message}")

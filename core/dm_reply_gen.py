@@ -97,14 +97,23 @@ def _truncate(text: str, limit: int = MAX_REPLY_CHARS) -> str:
 
 
 def build_messages(
-    *, incoming: str, history: list[dict[str, Any]] | None = None
+    *,
+    incoming: str,
+    history: list[dict[str, Any]] | None = None,
+    context: str = "",
 ) -> list[dict[str, str]]:
-    """拼对话上下文（让豆包知道"前面聊了什么"）。
+    """拼对话上下文（项目背景 + 前面的聊天 + 这一句）。
 
     ★ 为什么要带历史：主人说过「可以查看我前面的发言并回复我吗」——
     只给最后一句会让回复显得莫名其妙。
+
+    ★ 为什么要带 `context`：豆包不知道我们这些天做了什么。
+    给了「我是谁 / 项目在干什么 / 现在什么状态」，它答得才像"自己人"。
     """
-    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system = SYSTEM_PROMPT
+    if context.strip():
+        system = context.strip() + "\n\n" + system
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 
     # 最近 6 条历史（够用了，多了既费 token 又容易跑偏）
     for item in (history or [])[-6:]:
@@ -128,8 +137,18 @@ async def generate_reply(
     config: Any = None,
     client: httpx.AsyncClient | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    context: str = "",
 ) -> ReplyGenResult:
-    """用豆包生成一条回复。**失败返回结构化结果，不抛异常**。"""
+    """用豆包生成一条回复。**失败返回结构化结果，不抛异常**。
+
+    Args:
+        context: **项目上下文**（来自 :mod:`core.context_pack`）。
+
+            ★ 主人要求：「没法给豆包模型塞上下文让他看懂最起码我们浅层的内容吗」
+            豆包 lite 不知道我们这些天做了什么，不说清就答得像陌生人。
+            这一段会拼进 system 提示词，让它知道：
+            我是谁 / 项目在干什么 / 现在什么状态 / 主人有什么要求。
+    """
     if not incoming.strip():
         return ReplyGenResult(
             ok=False, error_code="EMPTY_INPUT", message="没有要回复的内容"
@@ -150,7 +169,9 @@ async def generate_reply(
     model = _model(config)
     payload = {
         "model": model,
-        "messages": build_messages(incoming=incoming, history=history),
+        "messages": build_messages(
+            incoming=incoming, history=history, context=context
+        ),
         "max_tokens": 400,
         "temperature": 0.7,
     }
