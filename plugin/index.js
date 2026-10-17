@@ -334,6 +334,13 @@ function applyInner(ctx, config) {
     }
   }
 
+  /** 服务探测状态（只读，给 /probe 用）。 */
+  const serviceProbe = {
+    agentsService: false,
+    agentsMethods: [],
+    error: '',
+  }
+
   // ---- 私信监听面板（2026-10-17）------------------------------------------
   //
   // 主人：「没有在插件里启动的方式吗」
@@ -485,6 +492,9 @@ function applyInner(ctx, config) {
           fields: readEditableSafe(cfg),
         })
       }
+      if (method === 'GET' && route === '/probe') {
+        return sendJson(res, 200, { ok: true, ...serviceProbe })
+      }
       if (route === '/watch') {
         if (method === 'GET') {
           return sendJson(res, 200, { ok: true, ...watchInfo() })
@@ -511,6 +521,33 @@ function applyInner(ctx, config) {
       return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
     }
   }
+
+  // ---- DSH 服务探测（2026-10-17，验证"插件内驱动思考"是否可行）--------
+  //
+  // 主人问：「为啥启动第一轮 headless 后保持它在后台不关闭不行吗」——
+  // `headless` 设计上答一个就退出，没有服务模式。但 DSH **内部**有服务：
+  //   `agents`（注册在 `@deepseek-ai/dsh-agent`，`super(ctx, "agents")`）
+  // 如果插件能 inject 到它，就能**进程内**驱动思考 —— 没有 20 秒冷启动。
+  //
+  // 这里只做**只读探测**：拿到没有、有哪些方法。不发消息、不建会话。
+  ctx.inject(['agents'], (scoped) => {
+    try {
+      const agents = scoped.agents
+      serviceProbe.agentsService = Boolean(agents)
+      if (agents) {
+        const proto = Object.getPrototypeOf(agents)
+        serviceProbe.agentsMethods = Object.getOwnPropertyNames(proto)
+          .filter((key) => typeof key === 'string' && !key.startsWith('_'))
+          .sort()
+      }
+      logger.info?.(
+        `bili-companion: agents 服务已拿到（${serviceProbe.agentsMethods.length} 个方法）`,
+      )
+    } catch (error) {
+      serviceProbe.error = String(error?.message ?? error)
+      logger.warn?.(`bili-companion: 探测 agents 失败 ${serviceProbe.error}`)
+    }
+  })
 
   // ★ 契约 1：必须等 webServer 就绪，不能在 apply 时直接读
   ctx.inject(['webServer'], (scoped) => {

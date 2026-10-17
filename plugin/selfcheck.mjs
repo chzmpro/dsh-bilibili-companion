@@ -213,6 +213,20 @@ ok(
 // 未启动时必须 running=false（不能一上来就骗人说在跑）
 ok(watchRoute.json?.running === false, 'GET /watch 初始 running=false')
 
+// ★ 契约：服务探测接口（2026-10-17）
+//   验证"插件能否拿到 DSH 的 agents 服务"——这是"进程内驱动思考"的前提。
+const probeRoute = await callRoute('GET', '/probe')
+ok(probeRoute.status === 200, `GET /probe 返回 200（实际 ${probeRoute.status}）`)
+ok(
+  probeRoute.json !== null &&
+    Object.prototype.hasOwnProperty.call(probeRoute.json, 'agentsService'),
+  'GET /probe 含 agentsService 字段',
+)
+ok(
+  Array.isArray(probeRoute.json?.agentsMethods),
+  'GET /probe 的 agentsMethods 是数组',
+)
+
 const configRoute = await callRoute('GET', '/config')
 ok(configRoute.json?.config !== undefined, 'GET /config 返回 config 对象')
 
