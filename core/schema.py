@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -543,6 +543,27 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         11,
         """
         ALTER TABLE dm_inbox ADD COLUMN delivered_at INTEGER;
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v12 —— 人设化推荐语（2026-10-18）
+    # ------------------------------------------------------------------
+    #
+    # 主人反馈：「推荐文字内容不太符合人设，感觉只是标题的复述，
+    #   应该贴合人设再进行推荐，是不是没有关于这方面的设置」
+    #
+    # 排查结果：**确实没有**。`notes.summary` 存的是 `candidate_comment`，
+    # 而那个字段的 prompt 明确写着「只是给上层模型的草稿建议，不是最终文本」
+    # ⇒ 它是"内容提取"风格（"该内容围绕DSH插件展开，清晰说明了…"），
+    #   复述标题、没有语气、没有人设。
+    #
+    # 这一列存的是**已经用小鲸鱼口吻写好的推荐语**：
+    #   · 由豆包基于 summary 改写（scripts/generate_recommendations.py）
+    #   · 推送时直接用，不再现算（省钱且稳定）
+    (
+        12,
+        """
+        ALTER TABLE notes ADD COLUMN recommendation TEXT;
         """,
     ),
 )
