@@ -45,7 +45,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 
 ---
 
-## 2. 你只能通过这 19 个 MCP 工具干活
+## 2. 你只能通过这 25 个 MCP 工具干活
 
 `mcp__bili_companion__*`：
 
@@ -55,10 +55,15 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 | **搜索方式①** | `expand_intent`（模糊意图 → 关键词） |
 | **搜索方式②** | `trends_suggest`（推荐流 → 候选池，**不自动改关键词**） |
 | 发现/阅读 | `discover_videos` `prepare_batch` `read_video` `read_evidence_excerpt` |
+| **私信** | `dm_inbox`（取待回复）`dm_reply`（回复某条）`dm_push`（**主动私信**） |
+| **读外部** | `find_repo`（从视频找仓库）`read_source`（读 GitHub/Gitee 源码）`web_search`（免费联网） |
 | 讨论 | `get_discussion` `check_interactions` |
 | 笔记/草稿 | `save_analysis` `list_drafts` `prepare_reply` |
 | 发布 | `publish_draft` `publish_reply` `like_video` `favorite_video` |
 | 其他 | `feedback` `pause` `owner_preferences` |
+
+> `dm_push` 是**主动推送**（推荐视频），不需要 `msg_seqno`；
+> `dm_reply` 是**回复某条私信**，必须有 `msg_seqno` 且有幂等。别混用。
 
 > ★ **候选词只进池子，不改关键词**。`trends_suggest` 采纳与否由主人决定
 > （他跑 `cli.app keywords --accept <词>`）。你**不要**试图自己改关注点。
@@ -163,7 +168,7 @@ cd D:/DeepSeek/projects/dsh-bilibili-companion
 ./.venv/Scripts/python.exe -m cli.app schedule        # 该不该跑
 ./.venv/Scripts/python.exe -m cli.app audit-persona   # 人设/红线审计
 ./.venv/Scripts/python.exe -m cli.app mention-status  # @ 主号投递记录
-./.venv/Scripts/python.exe -m cli.app tools           # 19 个 MCP 工具
+./.venv/Scripts/python.exe -m cli.app tools           # 25 个 MCP 工具
 ./.venv/Scripts/python.exe -m cli.app dm-read         # 读与主人的私信（只读）
 ./.venv/Scripts/python.exe -m cli.app dm-ingest       # 私信里的分享视频 → 走同一套短包管道
 ./.venv/Scripts/python.exe -m cli.app keywords        # 审候选关键词池（推荐流来的）
