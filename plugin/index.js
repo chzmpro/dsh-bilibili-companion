@@ -55,6 +55,10 @@ const CONFIG_DEFAULTS = Object.freeze({
   keywords: ['DSH插件', 'DeepSeek Harness', 'DSH 插件'],
   dailyTop: 3,
   valleyOnly: false,
+  // 私信监听面板（2026-10-17）
+  watchPort: 8848,
+  watchInterval: 60,
+  watchAutoReply: false,
 })
 
 // ---------------------------------------------------------------------------
@@ -88,6 +92,17 @@ function normalizeConfig(src, base) {
   if (typeof src.projectDir === 'string' && src.projectDir.trim() !== '') {
     out.projectDir = src.projectDir.trim()
   }
+  // 私信监听面板（2026-10-17）
+  const watchPort = Number(src.watchPort)
+  if (Number.isInteger(watchPort) && watchPort >= 1024 && watchPort <= 65535) {
+    out.watchPort = watchPort
+  }
+  const watchInterval = Number(src.watchInterval)
+  if (Number.isInteger(watchInterval) && watchInterval >= 15 && watchInterval <= 3600) {
+    out.watchInterval = watchInterval
+  }
+  if (typeof src.watchAutoReply === 'boolean') out.watchAutoReply = src.watchAutoReply
+
   if (Array.isArray(src.keywords)) {
     out.keywords = src.keywords
       .filter((k) => typeof k === 'string' && k.trim() !== '')
@@ -319,6 +334,100 @@ function applyInner(ctx, config) {
     }
   }
 
+  // ---- 私信监听面板（2026-10-17）------------------------------------------
+  //
+  // 主人：「没有在插件里启动的方式吗」
+  //
+  // 之前只能在终端跑 `cli.app dm-watch`。这里让插件**代起**：
+  //   POST /watch?action=start  → spawn 一个 dm-watch，记住 pid
+  //   POST /watch?action=stop   → 杀掉它
+  //   GET  /watch               → 现在跑没跑、端口多少
+  //
+  // ★ 为什么不 spawn 面板自己的常驻监听，而是 spawn 整个 dm-watch：
+  //   面板 + 监听是一个进程（`http.server` 主线程 + asyncio 后台线程），
+  //   杀掉这个进程两边一起停 —— 比管两个进程简单可靠。
+  let watchChild = null
+  let watchStartedAt = 0
+
+  function watchInfo() {
+    const alive = watchChild !== null && watchChild.exitCode === null
+    return {
+      running: alive,
+      pid: alive ? watchChild.pid : null,
+      port: cfg.watchPort || 8848,
+      url: `http://127.0.0.1:${cfg.watchPort || 8848}/`,
+      since: alive && watchStartedAt ? new Date(watchStartedAt).toISOString() : null,
+    }
+  }
+
+  function startWatch() {
+    if (watchChild !== null && watchChild.exitCode === null) {
+      return { started: false, hint: '已经在跑了', ...watchInfo() }
+    }
+    const py = pythonPath()
+    if (!existsSync(py)) {
+      return { started: false, hint: `找不到 Python：${py}` }
+    }
+    const port = Number(cfg.watchPort) || 8848
+    const args = ['-m', 'cli.app', 'dm-watch', '--port', String(port)]
+    if (cfg.watchInterval) args.push('--interval', String(cfg.watchInterval))
+    if (cfg.watchAutoReply) args.push('--reply')
+
+    const logFile = join(home, 'watch.log')
+    let fd
+    try {
+      fd = openSync(logFile, 'a')
+    } catch (error) {
+      return { started: false, hint: `日志打不开：${String(error)}` }
+    }
+    try {
+      // ⚠️ 这个**不能被 unref**：我们要能 kill 它、要知道它是否还活着。
+      watchChild = spawn(py, args, {
+        cwd: cfg.projectDir,
+        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        windowsHide: true,
+        stdio: ['ignore', fd, fd],
+        detached: false,
+      })
+      watchStartedAt = Date.now()
+      watchChild.on('error', (error) =>
+        logger.warn?.(`bili-companion: 起监听失败 ${String(error)}`),
+      )
+      watchChild.on('exit', (code) => {
+        logger.info?.(`bili-companion: 监听退出 exit=${String(code)}`)
+        watchChild = null
+      })
+      return { started: true, ...watchInfo(), log: logFile }
+    } catch (error) {
+      return { started: false, hint: String(error?.message ?? error) }
+    } finally {
+      closeSync(fd)
+    }
+  }
+
+  function stopWatch() {
+    if (watchChild === null || watchChild.exitCode !== null) {
+      return { stopped: false, hint: '本来就没在跑', ...watchInfo() }
+    }
+    const pid = watchChild.pid
+    try {
+      // Windows 上 kill() 对 npm 包起来的进程不一定彻底，先温和后强杀
+      watchChild.kill()
+      setTimeout(() => {
+        try {
+          if (watchChild !== null && watchChild.exitCode === null) watchChild.kill('SIGKILL')
+        } catch {
+          /* 已经死了就算了 */
+        }
+      }, 3000)
+    } catch (error) {
+      return { stopped: false, hint: String(error?.message ?? error) }
+    }
+    watchChild = null
+    watchStartedAt = 0
+    return { stopped: true, pid, ...watchInfo() }
+  }
+
   async function handler(req, res) {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const route = url.pathname.slice(API_PREFIX.length) || '/'
@@ -375,6 +484,17 @@ function applyInner(ctx, config) {
           yaml: yamlResult,
           fields: readEditableSafe(cfg),
         })
+      }
+      if (route === '/watch') {
+        if (method === 'GET') {
+          return sendJson(res, 200, { ok: true, ...watchInfo() })
+        }
+        if (method === 'POST') {
+          const action = url.searchParams.get('action') || ''
+          if (action === 'start') return sendJson(res, 200, { ok: true, ...startWatch() })
+          if (action === 'stop') return sendJson(res, 200, { ok: true, ...stopWatch() })
+          return sendJson(res, 400, { ok: false, error: `未知 action：${action}` })
+        }
       }
       if (method === 'POST' && route === '/run') {
         const result = startRun()

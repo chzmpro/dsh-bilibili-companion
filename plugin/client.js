@@ -68,6 +68,11 @@ window.__ModuleLoader__.load({
 [data-bc-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bc-msg][data-good]{color:#22c55e;}
+/* 私信监听卡片（2026-10-17） */
+[data-bc-card]{margin:10px 0;padding:10px 12px;border-radius:10px;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.12));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.08));}
+[data-bc-badge][data-on]{color:#22c55e;}
 [data-bc-msg][data-warn]{color:#f59e0b;}
 [data-bc-badge]{font-size:11px;padding:2px 7px;border-radius:6px;
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
@@ -349,6 +354,9 @@ window.__ModuleLoader__.load({
       // ★ 通用字段的本地草稿（2026-10-17）：键是点分路径。
       //   只放"用户正在编辑"的字段；没编辑过的显示服务端值。
       const [drafts, setDrafts] = React.useState({})
+      // ★ 私信监听状态（2026-10-17）：主人问"没有在插件里启动的方式吗"
+      const [watch, setWatch] = React.useState(null)
+      const [watchBusy, setWatchBusy] = React.useState(false)
 
       React.useEffect(() => {
         let alive = true
@@ -356,6 +364,13 @@ window.__ModuleLoader__.load({
           try {
             const d = await jget('/status')
             if (alive && d?.ok) setSt(d)
+            // 监听状态单独轮询（它变化比配置频繁）
+            try {
+              const w = await jget('/watch')
+              if (alive && w?.ok) setWatch(w)
+            } catch {
+              /* 读不到就保持上一次 */
+            }
           } catch {
             /* 网络抖动就下次再问 */
           }
@@ -464,6 +479,38 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // ★ 启停私信监听（2026-10-17）
+      const onWatchToggle = async () => {
+        setWatchBusy(true)
+        setMsg('')
+        try {
+          const action = watch?.running ? 'stop' : 'start'
+          const r = await jpost(`/watch?action=${action}`, {})
+          if (r?.ok) {
+            setTone('good')
+            setMsg(action === 'start' ? '监听已启动（新窗口会自动打开面板）' : '监听已停止')
+            if (action === 'start' && r.url) {
+              // 顺手在新标签页打开面板
+              try {
+                window.open(r.url, '_blank', 'noopener')
+              } catch {
+                /* 被浏览器拦了就让用户自己点链接 */
+              }
+            }
+            const w = await jget('/watch')
+            if (w?.ok) setWatch(w)
+          } else {
+            setTone('warn')
+            setMsg(`失败：${r?.hint || r?.error || '未知原因'}`)
+          }
+        } catch (error) {
+          setTone('warn')
+          setMsg(`请求失败：${String(error?.message ?? error)}`)
+        } finally {
+          setWatchBusy(false)
+        }
+      }
+
       if (!cfg) {
         return h('div', { 'data-bc-page': '' }, h('div', { 'data-bc-note': '' }, '读设置中…'))
       }
@@ -498,6 +545,66 @@ window.__ModuleLoader__.load({
               msg,
             )
           : null,
+        // ★ 私信监听（2026-10-17）
+        //   主人：「没有在插件里启动的方式吗」
+        //   这里能**起来/停掉**那个常驻进程，并给一个直达面板的链接。
+        h(
+          'div',
+          { 'data-bc-card': '' },
+          h(
+            'div',
+            { 'data-bc-row': '' },
+            h(
+              'div',
+              { 'data-bc-grow': '' },
+              h(
+                'div',
+                { 'data-bc-label': '' },
+                '私信监听',
+                h(
+                  'span',
+                  {
+                    'data-bc-badge': '',
+                    'data-on': watch?.running ? '' : undefined,
+                  },
+                  watch?.running ? ` 运行中 · 端口 ${watch.port}` : ' 已停止',
+                ),
+              ),
+              h(
+                'div',
+                { 'data-bc-note': '' },
+                '常驻查未读私信，能及时看到你发的消息。关掉它就收不到了。',
+              ),
+            ),
+            h(
+              'button',
+              {
+                'data-bc-btn': '',
+                'data-primary': watch?.running ? undefined : '',
+                disabled: watchBusy,
+                onClick: onWatchToggle,
+              },
+              watchBusy ? '处理中…' : watch?.running ? '停止监听' : '启动监听',
+            ),
+          ),
+          watch?.running && watch.url
+            ? h(
+                'div',
+                { 'data-bc-note': '', style: { marginTop: '8px' } },
+                '面板：',
+                h(
+                  'a',
+                  {
+                    href: watch.url,
+                    target: '_blank',
+                    rel: 'noopener',
+                    style: { color: 'var(--dsw-alias-brand, #3b82f6)' },
+                  },
+                  watch.url,
+                ),
+              )
+            : null,
+        ),
 
         /* ── 关注什么 ── */
         h(

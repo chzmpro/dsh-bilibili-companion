@@ -191,6 +191,28 @@ for (const field of ['keywords', 'dailyTop', 'projectDir', 'valleyOnly']) {
   )
 }
 
+// ★ 契约：私信监听接口（2026-10-17）
+//   前端靠 `watch.running / watch.port / watch.url` 决定按钮文案和链接。
+//   少了任一字段，界面会显示"已停止"但永远点不动 —— 又是 D19 那类静默卡住。
+const watchRoute = await callRoute('GET', '/watch')
+ok(watchRoute.status === 200, `GET /watch 返回 200（实际 ${watchRoute.status}）`)
+for (const field of ['running', 'port', 'url']) {
+  ok(
+    watchRoute.json !== null && Object.prototype.hasOwnProperty.call(watchRoute.json, field),
+    `GET /watch 含 ${field} 字段（前端依赖它）`,
+  )
+}
+ok(
+  typeof watchRoute.json?.port === 'number' && watchRoute.json.port >= 1024,
+  'GET /watch 的 port 是合法端口号',
+)
+ok(
+  typeof watchRoute.json?.url === 'string' && watchRoute.json.url.startsWith('http://127.0.0.1:'),
+  'GET /watch 的 url 指向本机（面板不对外暴露）',
+)
+// 未启动时必须 running=false（不能一上来就骗人说在跑）
+ok(watchRoute.json?.running === false, 'GET /watch 初始 running=false')
+
 const configRoute = await callRoute('GET', '/config')
 ok(configRoute.json?.config !== undefined, 'GET /config 返回 config 对象')
 
