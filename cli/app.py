@@ -598,6 +598,150 @@ def dm_poll(
     raise typer.Exit(code=code)
 
 
+@app.command("evolve")
+def evolve(
+    apply: str = typer.Option("", "--apply", help="**批准并写入**这份提案（传 proposal_id）"),
+    reject: str = typer.Option("", "--reject", help="拒绝这份提案（传 proposal_id）"),
+    show: bool = typer.Option(False, "--show", help="看框架与待审提案（默认行为）"),
+    propose: bool = typer.Option(
+        False, "--propose", help="生成一份提案（用当前配置与最近数据推导）"
+    ),
+    parameter: str = typer.Option(
+        "", "--param", help="配合 --propose：要调哪个参数（留空=自动挑）"
+    ),
+) -> None:
+    """**自我进化**：看提案 / 批准 / 拒绝。
+
+    ★ 四道硬闸（`core/evolution.py`）：
+
+    1. `auto_apply` **写死 False** —— 提案永不自动生效；
+    2. 单次步长上限 5%；
+    3. 参数硬边界，越界**直接拒绝**；
+    4. 每天最多 2 份提案。
+
+        ★ AI 只能**生成**提案（`pending`）；**批准/拒绝只能由你在终端做**。
+    配置里点一下就把参数改掉，等于绕过了人审。
+    """
+    _configure_stdio()
+    from core import evolution, evolution_store
+
+    db = _open_db()
+    db.migrate()
+
+    if not (apply or reject or propose or show):
+        show = True
+
+    if propose:
+        config = _load_config()
+        target = parameter.strip()
+        if not target:
+            # 自动挑：优先挑还没在待审里的
+            pending_params = {
+                item.parameter
+                for item in evolution_store.recent(
+                    db, limit=50, status=evolution_store.STATUS_PENDING
+                )
+            }
+            for candidate in evolution.EVOLVABLE_PARAMETERS:
+                full = evolution.PARAMETER_PATHS.get(candidate, candidate)
+                if full not in pending_params:
+                    target = full
+                    break
+        # ★ 短名/完整路径都可以 —— 统一交给 evolution.full_path 归一化
+        if target:
+            try:
+                target = evolution.full_path(target)
+            except evolution.EvolutionError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                db.close()
+                raise typer.Exit(code=1) from exc
+        if not target:
+            typer.secho("没有可提的参数（都已待审）", fg=typer.colors.YELLOW)
+            db.close()
+            raise typer.Exit(code=1)
+
+        try:
+            old_value = evolution_store.default_old_value(target, config)
+        except evolution.EvolutionError as exc:
+            typer.secho(f"读不到现值：{exc}", fg=typer.colors.RED, err=True)
+            db.close()
+            raise typer.Exit(code=1) from exc
+
+        # 建议方向：这里只做**一个小步**的示例提案（真实调参应由数据分析驱动）
+        short = evolution.short_name(target)
+        low, high, _ = evolution.EVOLVABLE_PARAMETERS[short]
+        step = evolution.MAX_PARAMETER_STEP if high <= 1.0 else max(1.0, abs(old_value) * 0.05)
+        suggestion = min(high, old_value + step)
+        stored, message = evolution_store.propose(
+            db,
+            parameter=target,
+            old_value=old_value,
+            new_value=suggestion,
+            reason="手动触发：基于当前配置的小步调整建议",
+        )
+        if stored is None:
+            typer.secho(f"未生成：{message}", fg=typer.colors.YELLOW)
+            db.close()
+            raise typer.Exit(code=1)
+        typer.secho(f"✅ 已生成提案 {stored.proposal_id}", fg=typer.colors.GREEN)
+        typer.echo(f"   {stored.parameter}: {stored.old_value} → {stored.new_value}")
+        typer.echo(f"   {message}")
+        db.close()
+        return
+
+    if apply:
+        from core.paths import project_root
+
+        ok, message = evolution_store.apply_proposal(
+            db,
+            proposal_id=apply.strip(),
+            config_path=project_root() / "config.yaml",
+        )
+        if ok:
+            typer.secho(f"✅ {message}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"❌ {message}", fg=typer.colors.RED, err=True)
+        db.close()
+        raise typer.Exit(code=0 if ok else 1)
+
+    if reject:
+        ok, message = evolution_store.reject(db, proposal_id=reject.strip())
+        if ok:
+            typer.secho(f"✅ {message}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"❌ {message}", fg=typer.colors.RED, err=True)
+        db.close()
+        raise typer.Exit(code=0 if ok else 1)
+
+    # 默认：看框架与待审
+    info = evolution.describe_framework()
+    state = evolution_store.summary(db)
+    typer.echo("=== 自我进化框架 ===")
+    typer.echo(f"  auto_apply（自动生效）: {info['auto_apply']}  ← 写死 False")
+    typer.echo(f"  单次步长上限: {info['max_parameter_step']}")
+    typer.echo(f"  每日提案上限: {info['daily_proposal_limit']}（今天已提 {state['today_count']}）")
+    typer.echo("  可进化参数:")
+    for name, spec in info["evolvable"].items():
+        typer.echo(f"    · {name}: [{spec['min']}, {spec['max']}] 默认 {spec['default']}")
+    typer.echo("  禁改项（授权/账号/密钥）:")
+    for name in info["forbidden"]:
+        typer.echo(f"    ✗ {name}")
+    typer.echo("")
+    typer.echo("=== 待审提案 ===")
+    if not state["pending"]:
+        typer.echo("  （没有）")
+    for item in state["pending"]:
+        typer.echo(f"  {item['proposal_id']}  {item['parameter']}")
+        typer.echo(f"    {item['old_value']} → {item['new_value']}（Δ{item['delta']:+}）")
+        typer.echo(f"    理由：{item['reason']}")
+    typer.echo("")
+    typer.echo(f"已批准 {state['applied_count']} 份，已拒绝 {state['rejected_count']} 份")
+    typer.echo(state["note"])
+    typer.echo("")
+    typer.echo("批准：cli.app evolve --apply <id>   拒绝：cli.app evolve --reject <id>")
+    db.close()
+
+
 @app.command("seen-export")
 def seen_export(
     out: Path | None = typer.Option(  # noqa: B008

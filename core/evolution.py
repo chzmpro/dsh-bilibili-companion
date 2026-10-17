@@ -73,6 +73,41 @@ EVOLVABLE_PARAMETERS: dict[str, tuple[float, float, float]] = {
     "published_within_days": (1.0, 90.0, 30.0),
 }
 
+#: 短名 → **完整配置路径**。
+#:
+#: ★ 为什么需要它：`EVOLVABLE_PARAMETERS` 的键用短名（好读），
+#: 但读 `Config` / 写 `config.yaml` 都需要完整路径（`discovery.score_topic_weight`）。
+#: 两处各写一套字符串必然漂移 ⇒ 集中在这里，测试钉死"每个键都有映射"。
+PARAMETER_PATHS: dict[str, str] = {
+    "score_topic_weight": "discovery.score_topic_weight",
+    "min_score_for_comment": "discovery.min_score_for_comment",
+    "published_within_days": "discovery.published_within_days",
+}
+
+
+def full_path(parameter: str) -> str:
+    """把短名（或完整路径）归一化成**完整配置路径**。
+
+    Raises:
+        EvolutionError: 短名没有映射。
+    """
+    name = parameter.strip()
+    if name in PARAMETER_PATHS:
+        return PARAMETER_PATHS[name]
+    if name in PARAMETER_PATHS.values():
+        return name
+    known = "、".join(f"{k}（{v}）" for k, v in PARAMETER_PATHS.items())
+    raise EvolutionError(f"「{parameter}」不在可进化清单；可选：{known}")
+
+
+def short_name(parameter: str) -> str:
+    """完整路径 → 短名（不认识的返回原值）。"""
+    for short, path in PARAMETER_PATHS.items():
+        if path == parameter:
+            return short
+    return parameter
+
+
 #: 单次提案允许的**最大变化量**（照抄 `max_parameter_step: 0.05`）。
 #:
 #: ★ 对"比率型"参数（0~1）是 0.05；对"天/分"型参数按**相对比例**限（见 :func:`clamp_step`）。
@@ -190,12 +225,23 @@ def make_proposal(
 
     ★ 为什么"拒绝"而不是"夹紧"：夹紧会让 AI 以为"我改成功了"，
     而实际改的是另一个值 —— 后续推理全错。**明确拒绝**更诚实。
+
+    Args:
+        parameter: 短名（`score_topic_weight`）或完整路径
+            （`discovery.score_topic_weight`）都可以，
+            内部统一归一化成短名再查白名单。
     """
     if _is_forbidden(parameter):
         raise EvolutionError(
             f"「{parameter}」是**禁改项**（授权/账号/密钥），"
             "自我进化永远不许碰 —— 这只能由人在终端改。"
         )
+    # ★ 归一化成短名（`EVOLVABLE_PARAMETERS` 的键是短名）
+    try:
+        name = short_name(full_path(parameter))
+    except EvolutionError as exc:
+        raise EvolutionError(str(exc)) from exc
+    parameter = name
     if parameter not in EVOLVABLE_PARAMETERS:
         allowed = "、".join(EVOLVABLE_PARAMETERS)
         raise EvolutionError(f"「{parameter}」不在可进化清单里（可选：{allowed}）")

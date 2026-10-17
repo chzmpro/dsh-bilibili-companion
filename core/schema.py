@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -451,6 +451,43 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         CREATE INDEX IF NOT EXISTS idx_dm_replies_at
             ON dm_replies(replied_at DESC);
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v9 —— 自我进化**提案账本**（2026-10-17）
+    # ------------------------------------------------------------------
+    #
+    # 主人：「自我进化我觉得可以开始了」。
+    #
+    # 为什么必须有这张表：
+    #   `core/evolution.py` 里的四道硬闸（`auto_apply` 写死 False、
+    #   步长上限、硬边界、每日 2 份）只保证"**单份**提案合法"，
+    #   **不保证**"一天只提 2 份" —— 那需要**持久化计数**。
+    #   没有账本的话进程一重启计数就归零，限额形同虚设。
+    #
+    # 为什么状态只有三种：
+    #   AI 只允许写 `pending`；`applied` / `rejected` **只能由人的 CLI 写**。
+    #   这是"提案制"的落点 —— 机器提、人批。
+    (
+        9,
+        """
+        CREATE TABLE IF NOT EXISTS evolution_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            parameter   TEXT NOT NULL,             -- 只允许 EVOLVABLE_PARAMETERS 里的
+            old_value   REAL NOT NULL,
+            new_value   REAL NOT NULL,
+            reason      TEXT NOT NULL DEFAULT '',
+            evidence    TEXT NOT NULL DEFAULT '[]',-- JSON 数组
+            status      TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','applied','rejected')),
+            created_at  INTEGER NOT NULL,
+            decided_at  INTEGER,                   -- 人做决定的时间
+            decided_by  TEXT NOT NULL DEFAULT ''   -- 'cli'（可追溯）
+        );
+        CREATE INDEX IF NOT EXISTS idx_evolution_created
+            ON evolution_proposals(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_evolution_status
+            ON evolution_proposals(status, created_at DESC);
         """,
     ),
 )

@@ -752,10 +752,10 @@ def test_no_sleep_in_tests_but_pause_constants_match_competitor() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_8_and_migrations_are_append_only() -> None:
-    assert schema.SCHEMA_VERSION == 8
+def test_schema_version_is_9_and_migrations_are_append_only() -> None:
+    assert schema.SCHEMA_VERSION == 9
     versions = [version for version, _ in schema.MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8], "迁移必须连续且只追加"
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9], "迁移必须连续且只追加"
 
 
 def test_migration_v5_creates_verification_ledger_on_existing_v4_db(tmp_path: Path) -> None:
@@ -780,7 +780,7 @@ def test_migration_v5_creates_verification_ledger_on_existing_v4_db(tmp_path: Pa
     db.close()
 
     upgraded = Database(tmp_path / "v4.db")
-    assert upgraded.migrate() == schema.SCHEMA_VERSION == 8
+    assert upgraded.migrate() == schema.SCHEMA_VERSION == 9
     assert upgraded.query_one(
         "SELECT name FROM sqlite_master WHERE name='comment_verifications'"
     ) is not None, "v5 必须建出复核账本表"
@@ -814,7 +814,7 @@ def test_migration_v7_creates_trends_rounds_on_existing_v6_db(tmp_path: Path) ->
     db.close()
 
     upgraded = Database(tmp_path / "v6.db")
-    assert upgraded.migrate() == schema.SCHEMA_VERSION == 8
+    assert upgraded.migrate() == schema.SCHEMA_VERSION == 9
     assert (
         upgraded.query_one("SELECT name FROM sqlite_master WHERE name='trends_rounds'")
         is not None
