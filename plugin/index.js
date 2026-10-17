@@ -61,6 +61,8 @@ const CONFIG_DEFAULTS = Object.freeze({
   watchAutoReply: false,
   // ★ 值班员会话 id（用户手动开的那个会话；投递只允许投给它）
   watchSessionId: '',
+  // ★ 监听是否随 DSH 自动启动（不是开机自启，DSH 退出会一起停）
+  watchAutoStart: true,
 })
 
 // ---------------------------------------------------------------------------
@@ -106,6 +108,8 @@ function normalizeConfig(src, base) {
   if (typeof src.watchAutoReply === 'boolean') out.watchAutoReply = src.watchAutoReply
   // 值班员会话 id（投递目标，白名单）
   if (typeof src.watchSessionId === 'string') out.watchSessionId = src.watchSessionId.trim()
+  // 监听是否随 DSH 自动启动（默认 true；设 false 就退回手动点按钮）
+  if (typeof src.watchAutoStart === 'boolean') out.watchAutoStart = src.watchAutoStart
 
   if (Array.isArray(src.keywords)) {
     out.keywords = src.keywords
@@ -722,10 +726,43 @@ function applyInner(ctx, config) {
     logger.info?.(`bili-companion: 设置页接口已挂载 ${API_PREFIX}`)
   })
 
+  // ---- 跟随 DSH 自动启动监听（2026-10-17）-------------------------------
+  //
+  // 主人：「是不是每次打开DSH需要你启动监听服务」—— 是，但可以自动化。
+  //
+  // ★ 这不是"开机自启"：监听的作用就是服务 DSH，DSH 不在时它没意义。
+  //   这里做成**子进程 + dispose 时 kill** ⇒ DSH 退出它自动跟着退，
+  //   不留后台孤儿，也不写注册表。
+  //
+  // ★ 延迟 5 秒再起：apply 阶段 DSH 正忙着加载插件，
+  //   这时候 spawn Python（还要装 MCP）会拖慢启动。
+  if (cfg.watchAutoStart !== false) {
+    const timer = setTimeout(() => {
+      const result = startWatch()
+      if (result.started) {
+        logger.info?.(`bili-companion: 监听已随 DSH 自动启动（端口 ${result.port}）`)
+      } else {
+        logger.warn?.(`bili-companion: 自动启动监听失败 —— ${result.hint || '未知原因'}`)
+      }
+    }, 5000)
+    // 定时器也要能收摊（D18：没有 disposer 的定时器会残留）
+    ctx.effect(() => () => clearTimeout(timer), 'bili-companion: watch-autostart-timer')
+  }
+
   // ★ 契约 2：所有要收摊的东西都挂在这
   ctx.effect(
     () => () => {
-      // 目前没有常驻资源（起一轮的子进程自己 unref 掉了）
+      // 监听是**跟随 DSH** 的：DSH 退出就把它停掉，不留后台孤儿进程。
+      // （这不是"开机自启" —— DSH 不在时监听没有任何意义）
+      try {
+        if (watchChild !== null && watchChild.exitCode === null) {
+          watchChild.kill()
+          logger.info?.('bili-companion: DSH 退出，已停止私信监听')
+        }
+      } catch {
+        /* 已经死了就算了 */
+      }
+      watchChild = null
     },
     'bili-companion: dispose',
   )
