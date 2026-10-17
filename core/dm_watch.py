@@ -378,10 +378,15 @@ class DmWatcher:
         context = ""
         try:
             from core.context_pack import build_context
-            from core.paths import data_dir
+            from core.paths import data_dir, project_root
 
             bundle = build_context(
-                self._handle(), digest_dir=data_dir() / "digests", data_dir=data_dir()
+                self._handle(),
+                digest_dir=data_dir() / "digests",
+                data_dir=data_dir(),
+                # ★ 人设全文（8,940 字）—— 主人要求"尽可能了解我的想法"
+                persona_path=project_root() / "docs" / "persona.md",
+                # AGENTS.md 交给 build_context 自动发现（全局那份才全）
             )
             context = bundle.to_prompt()
         except Exception:  # noqa: BLE001 —— 拿不到上下文也要能回（降级）
