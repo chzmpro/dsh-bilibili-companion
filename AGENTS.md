@@ -131,8 +131,13 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 
 ## 8. 想深入了解时看哪里（**按需，不要全读**）
 
+> ★ **新对话接手请先读 [`HANDOFF.md`](HANDOFF.md)** ——
+> 30 秒速览 / 当前状态 / 硬性原则 / 这轮踩的坑 / 未完成清单，一份就够。
+> 下面这些是**按需深挖**，不要一上来全读。
+
 | 想知道 | 看 |
 |---|---|
+| **接手：现在在哪、下一步做什么** | [`HANDOFF.md`](HANDOFF.md) |
 | 人设与红线 | [`docs/persona.md`](docs/persona.md) |
 | 为什么这么设计 / 与任务书的冲突 | [`docs/persona-conflicts.md`](docs/persona-conflicts.md) |
 | 怎么装、怎么用、出问题怎么办 | [`README.md`](README.md) |
