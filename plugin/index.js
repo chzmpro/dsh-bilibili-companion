@@ -540,7 +540,20 @@ function applyInner(ctx, config) {
               error: `找不到会话 ${sessionId}（是不是关了？）`,
             })
           }
+          // ★★★ 必须带 role（2026-10-17 真机踩到）
+          //
+          // 官方 `createUserMessage()` 的实现是：
+          //     createMessage({ ...input, role: "user" })
+          // 也就是说 **role 是它补上的**。我们绕过它直接调 followup，
+          // 就必须自己带上，否则 agent 组装请求时那条消息缺 role，
+          // 模型 API 会报：
+          //     Failed to deserialize the JSON body: messages[N]: missing field `role`
+          // 现象是「投递成功但会话每次都运行失败」—— 极难查。
+          //   `createMessage()` 还会补一个 `id: randomUUID()`，这里也补上，
+          //   让形状和官方路径完全一致。
           agent.followup({
+            id: globalThis.crypto?.randomUUID?.() ?? `dm-${Date.now()}`,
+            role: 'user',
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           })
