@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import MCPServer
 
@@ -27,7 +27,17 @@ from core.health import READY, as_state, human_action_for
 from core.lock import LockError, TaskLock
 from core.pipeline import LEVEL_UNAVAILABLE
 from core.ratelimit import RateLimitExceeded, RequestsBlocked
-from core.runtime import Runtime, build_runtime, config_diagnostics
+
+# ★ 启动优化（2026-10-18）：`core.runtime` 单独 import 约 2 秒，
+#   但它只在两个地方用到（get_runtime / config_diagnostics），
+#   **注册 MCP 工具时完全不需要** ⇒ 改成函数内惰性导入。
+#
+#   背景：DSH loader 日志明确写着在等我们
+#     `still waiting for 1 plugin entries after 8s: @deepseek-ai/dsh-mcp-client`
+#   而 MCP 冷启动实测 6.2 秒（mcp SDK 3.6s + 我们 0.95s + python 启动）。
+#   这里先把能省的省掉；mcp SDK 那 3.6 秒换成任何 Python 实现都跑不掉。
+if TYPE_CHECKING:
+    from core.runtime import Runtime
 from core.storage import REPLY_ACTION, TOP_ACTION
 
 SERVER_NAME = "bili_companion"
@@ -72,8 +82,17 @@ server: MCPServer = MCPServer(
 _runtime: Runtime | None = None
 
 
+def _config_diagnostics(config: Any) -> Any:
+    """惰性调用 `core.runtime.config_diagnostics`（见顶部说明）。"""
+    from core.runtime import config_diagnostics
+
+    return config_diagnostics(config)
+
+
 async def get_runtime() -> Runtime:
     """惰性组装运行时（**不访问 B 站**）。"""
+    from core.runtime import build_runtime
+
     global _runtime
     if _runtime is None:
         _runtime = await build_runtime()
@@ -149,7 +168,7 @@ async def companion_status() -> dict[str, Any]:
     data: dict[str, Any] = {
         "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
         "data_dir": paths.data_dir_report(),
-        "config": config_diagnostics(config),
+        "config": _config_diagnostics(config),
         "credentials": cookie_diagnostics(),
         "platform_health": {
             "state": health_state,
