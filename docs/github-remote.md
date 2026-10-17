@@ -1,4 +1,4 @@
-# GitHub 远端与推送方式（2026-10-17）
+# GitHub 远端与推送（2026-10-17）
 
 ## 结论
 
@@ -6,58 +6,103 @@
 |---|---|
 | 远端 | `https://github.com/chzmpro/dsh-bilibili-companion`（**私有**） |
 | 分支 | `main` |
-| 推送方式 | **Git Data API**（`git push` 在本机走不通） |
-| 内容一致性 | ✅ 183 文件、0 差异 |
+| 推送方式 | **普通 `git push`**（配好 git 代理即可） |
+| 内容一致性 | ✅ 185 文件、0 差异 |
 
-## 为什么不能 `git push`
+## ★ 曾经的误判：以为 `git push` 不可用
 
-本机 `github.com:443`（git push 走的主机）**完全不通**：
+上一轮 `git push` 报 `Empty reply from server` / `connection reset`，
+当时的结论是"本机 git 到 GitHub 不通，必须改用 Git Data API 推送"。
 
-| 主机 | 实测 |
+**那个结论是错的。** 真实根因是 **git 没配代理**。
+
+### 真根因
+
+**git 用的 libcurl 不读 Windows 注册表里的系统代理**，
+所以「浏览器能上网 + 系统代理已开」≠「git 能上网」。
+
+系统代理（注册表）：
+```
+HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+  ProxyEnable = 1
+  ProxyServer = 127.0.0.1:7897      ← Clash 系
+```
+
+实测对照（同一时刻）：
+
+| 方式 | 结果 |
 |---|---|
-| `github.com:443` | ❌ HTTP 000 / connection reset |
-| `ssh.github.com:443` | ✅ TCP 通，但 `Permission denied (publickey)`（没有 key） |
-| `api.github.com` | ✅ **200** |
+| `curl --noproxy '*' https://github.com` | ❌ **15 秒超时** |
+| `curl -x http://127.0.0.1:7897 https://github.com` | ✅ **HTTP 200 / 2.7 秒** |
+| `git push`（未配代理） | ❌ 连接重置 |
+| `git push`（配了代理） | ✅ **正常** |
 
-- 试过用 API 挂 SSH key（`POST /user/keys`）→ 返回 `Not Found`，
-  说明存着的 token **没有 `admin:public_key` 权限**。
-- ⚠️ `git ls-remote` 偶尔会**碰巧成功一次**，别据此以为 git 能用了。
-
-## 推送命令
+## 修复（一次性）
 
 ```bash
-cd D:/DeepSeek/projects/dsh-bilibili-companion
-export PYTHONIOENCODING=utf-8
-TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' \
-  | git -c credential.interactive=false credential fill 2>/dev/null \
-  | sed -n 's/^password=//p')
-GH_PUSH_TOKEN="$TOKEN" ./.venv/Scripts/python.exe -u scripts/push_via_api.py
+# 1. 先确认代理端口在听、且能到 github
+netstat -ano | grep 127.0.0.1:7897
+curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:7897 https://github.com
+
+# 2. 配给 git
+git config --global http.proxy  http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
+
+# 3. 验证
+git ls-remote origin          # 能列出 ref = 通了
+git push origin main          # 正常推送
 ```
 
-脚本按本地提交顺序逐个重建（`blobs` → `trees` → `commits` → `PATCH ref`），
-**历史完整保留**。
+> ⚠️ 代理端口会变（Clash 常见 7890/7897，v2ray 常见 10808/10809）。
+> **读注册表拿当前值，不要写死**：
+> ```bash
+> reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -v ProxyServer
+> ```
 
-## 三个坑（都实测踩过）
-
-| # | 坑 | 解法 |
-|---|---|---|
-| 1 | 空仓库 `POST /git/blobs` → `409 Git Repository is empty` | 先用 Contents API（`PUT /contents/README.md`）播一个初始提交 |
-| 2 | `git credential fill` 在 Python 子进程里返回空（要 TTY） | 在 shell 里取好 token，用环境变量传给 Python |
-| 3 | API 重建的 commit SHA ≠ 本地 SHA | **内容逐字节一致**；判同步要比 **blob sha**，不比 commit sha |
-
-## 验证同步（正确方式）
+## 以后的推送流程（就一条命令）
 
 ```bash
-# 远端 blob 表 vs 本地 ls-tree -r HEAD，逐路径比对 sha
-# 实测：183 文件、0 差异
+git push origin main
 ```
+
+不再需要 `scripts/push_via_api.py`。
+
+## `scripts/push_via_api.py` 的去留
+
+**保留但不再优先使用**。它是"以为 git push 不可用"时的应急产物，
+走 GitHub Git Data API 逐个重建 blobs/trees/commits。
+
+只有在**代理彻底不可用**时才考虑它。它踩过的三个坑仍值得记：
+
+1. 空仓库 `POST /git/blobs` → `409 Git Repository is empty`，需先用 Contents API 播初始提交；
+2. `git credential fill` 在 Python 子进程里返回空（要 TTY）⇒ 得从 shell 传环境变量；
+3. API 重建的 commit SHA ≠ 本地 SHA ⇒ **判同步要比 blob sha，不比 commit sha**。
+
+## 提交规范（沿用旧项目 `dsh-bili-curator`）
+
+**Conventional Commits + 中文描述**：
+
+```
+feat(scope): 中文说明
+fix(scope): 中文说明
+docs: 中文说明
+test(scope): 中文说明
+chore: 中文说明
+refactor(scope): 中文说明
+```
+
+- `scope` 用**小写模块名**（`dm` / `settings` / `ego` / `auth` / `cli` …）；
+- 描述用中文、**不加句号**；
+- body 写清「用户原话 / 根因 / 实测数据 / 怎么改的」。
+
+作者统一为 `chzmpro <2660578994@qq.com>`。
 
 ## 旧项目已下架
 
 `chzmpro/dsh-bili-curator`（旧版，45 commits，私有）已**归档**：
 - `archived: true`（只读、不可再推）
-- description 改成 `[ARCHIVED / 已下架] superseded by dsh-bilibili-companion`
+- description 改为 `[ARCHIVED / 已下架] superseded by dsh-bilibili-companion`
 
-> ⚠️ 归档是**可逆**的（`PATCH archived:false` 即恢复）。
-> **彻底删除**需要单独确认——GitHub 删除仓库不可恢复。
+> ⚠️ 归档**可逆**（`archived:false` 即恢复）。
+> **彻底删除**需单独确认——GitHub 删仓库不可恢复。
 > 本地副本仍在 `D:/DeepSeek/projects/dsh-bili-curator`（45 commits 完整）。
