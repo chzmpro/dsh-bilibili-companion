@@ -100,6 +100,9 @@ class DmSendResult:
     code: str
     msg_key: str | None = None
     message: str = ""
+    #: 是不是"想发卡片但平台不支持，已自动降级成文本"（2026-10-17）。
+    #: B站 **web 端** `send_msg` 只吃 `msg_type=1`，卡片一律 `-400`。
+    card_dropped: bool = False
 
 
 def parse_content(raw: Any) -> tuple[str, dict[str, Any]]:
@@ -218,11 +221,26 @@ async def send_to_owner(
     text: str,
     db: Any = None,
     client: httpx.AsyncClient | None = None,
+    share_bvid: str = "",
+    share_title: str = "",
+    share_author: str = "",
+    share_cover: str = "",
+    share_aid: int = 0,
 ) -> DmSendResult:
     """给**主人**发一条私信。
 
     接收者是 ``config.account.owner_mid``，**调用方无法指定其他人**。
     写请求**不重试**：网络错误一律报"结果未知，不得重发"。
+
+    ★ 2026-10-17 新增**分享卡片**（主人要求）：
+
+    > 「在B站给我发私信时，有视频参考的要发视频，
+    >   而且视频是要分享的那种卡片形式而不是链接形式」
+
+    * 给了 ``share_bvid`` 就走 ``msg_type=7``（B站分享卡片）；
+    * 否则仍是纯文本（``msg_type=1``）；
+    * 卡片字段**照抄真实样本**（从主人发来的私信里抓的）：
+      ``{author, headline, id, source, thumb, title, bvid}``。
     """
     allowed, reason = dm_reply_allowed(config)
     if not allowed:
@@ -237,7 +255,9 @@ async def send_to_owner(
             )
 
     body_text = text.strip()
-    if not body_text:
+    # ★ 分享卡片允许**空正文**（卡片本身就是内容）；
+    #   纯文本私信仍然不许空。
+    if not body_text and not share_bvid.strip():
         raise DmError("EMPTY_TEXT", "私信正文为空。")
     if len(body_text) > MAX_DM_CHARS:
         raise DmError("TEXT_TOO_LONG", f"私信正文超过 {MAX_DM_CHARS} 字符。")
@@ -248,20 +268,31 @@ async def send_to_owner(
     agent_mid = int(config.account.agent_mid)
     csrf = cookies.csrf_token() or ""
 
-    payload: dict[str, str] = {
-        "msg[sender_uid]": str(agent_mid),
-        "msg[receiver_id]": str(owner_mid),
-        "msg[receiver_type]": "1",
-        "msg[msg_type]": str(MSG_TYPE_TEXT),
-        "msg[msg_status]": "0",
-        "msg[dev_id]": uuid.uuid4().hex.upper(),
-        "msg[timestamp]": str(int(time.time())),
-        "msg[content]": json.dumps({"content": body_text}, ensure_ascii=False),
-        "csrf": csrf,
-        "csrf_token": csrf,
-        "build": "0",
-        "mobi_app": "web",
-    }
+    # ★ 2026-10-17 实测结论：B站 **web 端** `send_msg` 只接受 `msg_type=1`。
+    #
+    #   卡片（`msg_type=6` / `7`）在此接口上一律返回 `-400 请求错误`，
+    #   换过 `source` 0/1/2/5、`id` 字符串/int、带 content 字段等全部形态，
+    #   而同样请求下 `msg_type=1` 返回 `code=0 OK`。
+    #   ⇒ 这是**平台侧限制**，不是参数写错（详见 docs/dm-share-card.md）。
+    #
+    #   所以 `share_bvid` 的行为是：**先按卡片尝试一次**（将来若放开就直接生效），
+    #   遇到 `-400` 再**自动降级**为排版好的文本 —— 而不是让你收到一个报错。
+    bvid = share_bvid.strip()
+    use_card = bool(bvid)
+    if use_card:
+        content_obj: dict[str, Any] = {
+            "author": share_author or "",
+            "headline": "",
+            "id": int(share_aid) if share_aid else 0,
+            "source": 5,  # 5 = 视频（从真实样本观测）
+            "thumb": share_cover or "",
+            "title": share_title or "",
+            "bvid": bvid,
+        }
+        msg_type = MSG_TYPE_SHARE
+    else:
+        content_obj = {"content": body_text}
+        msg_type = MSG_TYPE_TEXT
 
     owns_client = client is None
     http = client or httpx.AsyncClient(
@@ -276,27 +307,62 @@ async def send_to_owner(
         },
         trust_env=False,
     )
+
+    async def _post(mtype: int, content: dict[str, Any]) -> dict[str, Any]:
+        """发一次；返回响应体。网络错误**一律**抛 `WRITE_NETWORK`（不重试）。"""
+        payload: dict[str, str] = {
+            "msg[sender_uid]": str(agent_mid),
+            "msg[receiver_id]": str(owner_mid),
+            "msg[receiver_type]": "1",
+            "msg[msg_type]": str(mtype),
+            "msg[msg_status]": "0",
+            "msg[dev_id]": uuid.uuid4().hex.upper(),
+            "msg[timestamp]": str(int(time.time())),
+            "msg[content]": json.dumps(content, ensure_ascii=False),
+            "csrf": csrf,
+            "csrf_token": csrf,
+            "build": "0",
+            "mobi_app": "web",
+        }
+        try:
+            response = await http.post(
+                DM_HOST + SEND_PATH, data=payload, cookies=cookies.values
+            )
+            parsed: Any = response.json()
+            return parsed if isinstance(parsed, dict) else {}
+        except httpx.HTTPError as exc:
+            raise DmError(
+                "WRITE_NETWORK",
+                f"网络错误（{type(exc).__name__}）：结果未知，**不得重发**。",
+            ) from exc
+        except ValueError as exc:
+            raise DmError("WRITE_BAD_JSON", "响应不是合法 JSON：结果未知。") from exc
+
+    def _code_of(body: Any) -> int:
+        if not isinstance(body, dict):
+            raise DmError("WRITE_BAD_SHAPE", "响应结构异常。")
+        code = body.get("code")
+        return int(code) if isinstance(code, int) else -1
+
+    dropped_share = False
     try:
-        response = await http.post(
-            DM_HOST + SEND_PATH, data=payload, cookies=cookies.values
-        )
-        body = response.json()
-    except httpx.HTTPError as exc:
-        raise DmError(
-            "WRITE_NETWORK",
-            f"网络错误（{type(exc).__name__}）：结果未知，**不得重发**。",
-        ) from exc
-    except ValueError as exc:
-        raise DmError("WRITE_BAD_JSON", "响应不是合法 JSON：结果未知。") from exc
+        body = await _post(msg_type, content_obj)
+        numeric = _code_of(body)
+        if use_card and numeric == -400:
+            # ★ B站 web 接口不支持卡片（实测，见上方注释）→ 降级为排版好的文本。
+            #   只在**明确 -400** 时降级；网络错误/其他错误**不重试**（写请求铁律）。
+            dropped_share = True
+            body = await _post(MSG_TYPE_TEXT, {"content": _share_text_fallback(
+                body_text=body_text,
+                title=share_title,
+                author=share_author,
+                bvid=bvid,
+            )})
+            numeric = _code_of(body)
     finally:
         if owns_client:
             await http.aclose()
 
-    if not isinstance(body, dict):
-        raise DmError("WRITE_BAD_SHAPE", "响应结构异常。")
-
-    code = body.get("code")
-    numeric = int(code) if isinstance(code, int) else -1
     if numeric != 0:
         raise DmError(
             f"BILI_CODE_{numeric}",
@@ -310,4 +376,28 @@ async def send_to_owner(
         code="OK",
         msg_key=msg_key,
         message=str(body.get("message") or ""),
+        card_dropped=dropped_share,
     )
+
+
+def _share_text_fallback(
+    *, body_text: str, title: str, author: str, bvid: str
+) -> str:
+    """卡片发不出去时，把视频信息排成**人看着像卡片**的文本。
+
+    ★ 为什么还要排版：既然 B站不给发卡片（见 :func:`send_to_owner` 注释），
+    那就至少在**文本层面**把标题、UP、BV、链接给全，别让主人收到一个光秃秃的链接。
+    """
+    parts: list[str] = []
+    if body_text:
+        parts.append(body_text.strip())
+    lines: list[str] = []
+    if title:
+        lines.append(f"🎬 {title}")
+    if author:
+        lines.append(f"👤 UP：{author}")
+    if bvid:
+        lines.append(f"🔗 https://www.bilibili.com/video/{bvid}/")
+    if lines:
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)

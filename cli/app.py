@@ -787,9 +787,17 @@ def dm_read(size: int = typer.Option(20, "--size", help="拉取条数")) -> None
 @app.command("dm-send")
 def dm_send(
     text: str = typer.Option(..., "--text", help="私信正文（**只能发给主人**）"),  # noqa: B008
+    share: str = typer.Option(
+        "", "--share", help="附带的视频 BV 号 → 发成**分享卡片**（不是链接）"
+    ),
     confirm: bool = typer.Option(False, "--yes", help="确认真实发送"),
 ) -> None:
-    """**人**给主人发一条私信。接收者硬编码为 ``owner_mid``，无法发给别人。"""
+    """**人**给主人发一条私信。接收者硬编码为 ``owner_mid``，无法发给别人。
+
+    ★ 给了 ``--share BV号`` 就发 **B站分享卡片**（``msg_type=7``），
+    而不是贴一个链接 —— 主人明确要求过这个形式。
+    卡片所需的标题/UP/封面会**自动去取**（只读一次视频详情）。
+    """
     _configure_stdio()
     import asyncio
 
@@ -815,9 +823,44 @@ def dm_send(
         raise typer.Exit(code=3) from exc
 
     db = _open_db()
+
+    # ★ 要发分享卡片时，先取视频详情（标题/UP/封面）——**只读一次**
+    share_kwargs: dict[str, Any] = {}
+    bvid = share.strip()
+    if bvid:
+        from core.bilibili import BilibiliReader, BilibiliReadError
+        from core.ratelimit import RequestQueue
+
+        queue = RequestQueue(db=db, config=config)
+
+        async def _fetch_detail() -> Any:
+            reader = BilibiliReader(queue=queue, cookies=bundle.values)
+            try:
+                return await reader.get_video_detail(bvid)
+            finally:
+                await queue.aclose()
+
+        try:
+            detail = asyncio.run(_fetch_detail())
+        except (BilibiliReadError, Exception) as exc:  # noqa: BLE001
+            db.close()
+            typer.secho(f"取视频详情失败：{exc}", fg=typer.colors.RED, err=True)
+            typer.echo("提示：分享卡片需要标题/UP/封面；取不到就没法发卡片。")
+            raise typer.Exit(code=1) from exc
+        share_kwargs = {
+            "share_bvid": detail.bvid,
+            "share_title": detail.title,
+            "share_author": detail.up_name,
+            "share_cover": detail.cover_url if hasattr(detail, "cover_url") else "",
+            "share_aid": detail.aid,
+        }
+        typer.echo(f"将发分享卡片：{detail.title[:40]}（UP：{detail.up_name}）")
+
     try:
         result = asyncio.run(
-            send_to_owner(config=config, cookies=bundle, text=text, db=db)
+            send_to_owner(
+                config=config, cookies=bundle, text=text, db=db, **share_kwargs
+            )
         )
     except DmError as exc:
         db.close()
@@ -826,6 +869,14 @@ def dm_send(
         raise typer.Exit(code=1) from exc
     db.close()
     typer.secho(f"已发送给主人（msg_key={result.msg_key}）", fg=typer.colors.GREEN)
+    if getattr(result, "card_dropped", False):
+        typer.secho(
+            "⚠️ 卡片发不出去，已自动降级为**排版好的文本**。\n"
+            "   原因：B站 **web 端** send_msg 只接受 msg_type=1，"
+            "卡片（6/7）一律 -400 —— 这是平台限制，不是配置问题。\n"
+            "   详见 docs/dm-share-card.md",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command("dm-ingest")

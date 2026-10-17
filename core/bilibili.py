@@ -91,6 +91,9 @@ class VideoDetail:
     reply_count: int
     pages: int = 1
     source_url: str = ""
+    #: 封面图 URL（2026-10-17 新增）—— 私信**分享卡片**要用它。
+    #: 没有封面时卡片会显示灰色占位，体验很差。
+    cover_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -477,6 +480,8 @@ def _parse_video_detail(data: dict[str, Any], bvid: str) -> VideoDetail:
         reply_count=int(stat.get("reply", 0) or 0),
         pages=pages,
         source_url=f"https://www.bilibili.com/video/{bvid}/",
+        # ★ 封面：`view` 接口的 `pic` 字段（私信分享卡片要用）
+        cover_url=str(data.get("pic", "") or ""),
     )
 
 
