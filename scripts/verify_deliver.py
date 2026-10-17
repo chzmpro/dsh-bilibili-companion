@@ -149,10 +149,24 @@ def main() -> int:
         if not result.ok:
             print("❌ 投递失败，不必等了")
             return 1
-        print(f"等 {args.wait:.0f} 秒…")
-        time.sleep(args.wait)
+        # ★ 轮询而不是固定等待（2026-10-17 两次假阴性）：
+        #   ① 会话是**边跑边写**的，正好在写时解压会漏尾部事件；
+        #   ② agent 调工具时可能跑几分钟，固定 40 秒根本不够。
+        print(f"等最多 {args.wait:.0f} 秒（有新轮次立刻返回）…")
+        deadline = time.time() + max(args.wait, 1)
+        while time.time() < deadline:
+            time.sleep(5)
+            probe = analyze(decompress(path))
+            if probe["turns"] > before["turns"]:
+                break
 
     after = analyze(decompress(path))
+    # ★ 若轮数没增加，再采样两次（防"文件还在写"）
+    for _ in range(3):
+        if after["turns"] > before["turns"]:
+            break
+        time.sleep(5)
+        after = analyze(decompress(path))
     print()
     print("=" * 58)
     print(f"轮数：{before['turns']} → {after['turns']}")
