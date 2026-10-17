@@ -224,3 +224,60 @@ def test_watcher_uses_doubao_by_default(db: Database) -> None:
     assert FALLBACK_REPLY
     # 默认仍然不自动发（要 --reply 才发）
     assert watcher.auto_reply is False
+
+
+def test_reply_to_syncs_inbox_status(db: Database) -> None:
+    """★★ reply_to 必须把 dm_inbox.status 同步成 answered（2026-10-17 值班员发现的 bug）。
+
+    原来这条路**只写 dm_replies**，不动 dm_inbox.status ⇒ 状态永远停在 pending。
+    后果：
+      ① 值班员每次被唤醒都把这些消息当成"新私信"要求回复；
+      ② 但 dm_replies 里已有记录 ⇒ 幂等规则挡掉（BLOCKED）；
+      ③ 那条 pending 永远回不了，链路看着像坏了。
+    """
+    import asyncio
+
+    from core.dm_live import reply_to
+
+    seq = 2626637178957825
+    db.execute(
+        "INSERT INTO dm_inbox (msg_seqno, text, received_at, status, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (seq, "测试", 1700000000, "pending", 1700000000),
+    )
+
+    class _Cfg:
+        class interaction:  # noqa: N801
+            pause = False
+            dm_reply_enabled = True
+
+    class _Cookies:
+        def has_write_credentials(self) -> bool:
+            return True
+
+        def csrf_token(self) -> str:
+            return "x"
+
+    # 打桩 send_to_owner，避免真发
+    import core.dm_live as live
+
+    async def fake_send(**kwargs: Any) -> Any:
+        class _R:
+            msg_key = "k"
+
+        return _R()
+
+    original = live.send_to_owner
+    live.send_to_owner = fake_send  # type: ignore[assignment]
+    try:
+        ok, _ = asyncio.run(
+            reply_to(db=db, config=_Cfg(), cookies=_Cookies(), msg_seqno=seq, text="回复")
+        )
+    finally:
+        live.send_to_owner = original  # type: ignore[assignment]
+
+    assert ok is True
+    row = db.query_one("SELECT status, delivered_at FROM dm_inbox WHERE msg_seqno = ?", (seq,))
+    assert row is not None
+    assert row["status"] == "answered", "reply_to 必须把 inbox 标成 answered"
+    assert row["delivered_at"] is not None, "reply_to 也应补上 delivered_at"

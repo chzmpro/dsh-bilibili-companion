@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import hashlib
 import json
 import re
@@ -612,6 +614,15 @@ class TextWorker:
 
     # ---- 调用 --------------------------------------------------------------
 
+    @property
+    def last_dimensions(self) -> dict[str, int]:
+        """最近一次 `analyze()` 算出的**分项分数**（诊断用，可能为空）。
+
+        值形如 ``{"topic": 88, "usefulness": 75, "novelty": 60, "evidence": 70}``。
+        只在当前进程内有意义 —— 不落库、不对外暴露给 MCP。
+        """
+        return dict(getattr(self, "_last_dimensions", {}) or {})
+
     async def analyze(
         self,
         *,
@@ -817,6 +828,14 @@ class TextWorker:
                 getattr(getattr(self.config, "discovery", None), "score_topic_weight", None)
             ),
         )
+
+        # ★ 把这次的分项分数留在实例上（`_last_dimensions`），供**诊断/重算**用。
+        #
+        # 为什么不在 CandidateCard 上加字段：那会改动对外契约（MCP 返回、
+        # 数据库落库、前端渲染都要跟着改）。留一个只读属性最省事、零风险。
+        # 用途：`scripts/rescore.py` 重算时展示新旧分项差异。
+        with contextlib.suppress(Exception):  # 诊断用，失败绝不影响主流程
+            self._last_dimensions = dict(dimensions)
 
         return CandidateCard(
             bvid=bvid,

@@ -31,6 +31,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -211,4 +213,29 @@ async def reply_to(
         reply_text=text,
         remote_msg_key=str(getattr(result, "msg_key", "") or ""),
     )
+
+    # ★★ 把 `dm_inbox` 的状态同步成 answered（2026-10-17 值班员发现的真 bug）
+    #
+    # 原来这条路径**只写 `dm_replies`**，没动 `dm_inbox.status` ⇒ 状态永远停在
+    # `pending`。后果：
+    #   ① 值班员每次被唤醒都把这些消息当成"新私信"要求回复；
+    #   ② 但 `dm_replies` 里已有记录 ⇒ 幂等规则挡掉（BLOCKED）；
+    #   ③ 于是那条 pending 永远回不了，链路看着像坏了。
+    #
+    # 放在 `reply_to` 里（而不是各个调用点）是因为：
+    #   自动回复（dm_watch）、MCP 的 dm_reply、CLI 都在走这个函数 ⇒
+    #   一处修好，全部受益，不会再出现"某条路径漏更新"。
+    #
+    # 影响 0 行是正常的（那条私信可能不在 inbox 里，例如历史消息）。
+    with contextlib.suppress(Exception):
+        db.execute(
+            "UPDATE dm_inbox SET status = 'answered' WHERE msg_seqno = ?",
+            (int(msg_seqno),),
+        )
+        db.execute(
+            "UPDATE dm_inbox SET delivered_at = COALESCE(delivered_at, ?) "
+            "WHERE msg_seqno = ?",
+            (int(time.time()), int(msg_seqno)),
+        )
+
     return True, f"已回复（msg_key={getattr(result, 'msg_key', '')}）"
