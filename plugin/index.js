@@ -542,7 +542,11 @@ function applyInner(ctx, config) {
           let resumed = false
           if (!agent) {
             try {
-              agent = await agents.resume({ resumeSessionId: sessionId })
+              // ⚠️ resume 返回的是 **handle**（含 close），不是 agent 对象。
+              //    但它会把 agent 注册进 store ⇒ 恢复后**再 get 一次**。
+              //    （2026-10-17 踩到：直接用返回值 ⇒ "agent.followup is not a function"）
+              await agents.resume({ resumeSessionId: sessionId })
+              agent = agents.get(sessionId)
               resumed = Boolean(agent)
               logger.info?.(
                 `bili-companion: 会话 ${sessionId.slice(-8)} 已从磁盘恢复 (${resumed})`,
