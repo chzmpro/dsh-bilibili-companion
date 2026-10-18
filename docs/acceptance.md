@@ -18,13 +18,13 @@
 
 | 验收维度 | 状态 |
 |---|---|
-| 代码 + 自动化测试（**622 项**） | ✅ **通过** |
-| 静态检查（ruff + mypy strict，34 源文件） | ✅ **通过** |
-| MCP 服务端（真实 stdio 协议，17 工具） | ✅ **通过** |
+| 代码 + 自动化测试（**1086 项**，2026-10-18） | ✅ **通过** |
+| 静态检查（ruff + mypy strict，53 源文件） | ✅ **通过** |
+| MCP 服务端（真实 stdio 协议，25 工具） | ✅ **通过** |
 | 只读闭环（发现→证据→短包→日报） | ✅ **通过（mock 平台）** |
 | 模拟发布（dry_run，真实写入 = 0） | ✅ **通过** |
-| **真实写入（评论 @ / 点赞 / 收藏）** | ✅ **通过（B站 侧回读确认）** |
-| token 对照实验（目标 ≥60%） | ✅ **通过（83.7%，估算口径）** |
+| **真实写入（评论 @ / 点赞 / 收藏）** | ✅ **通过（2026-10-15）**；核验的是 @ 目标与点赞/收藏状态。**发布状态机的作者/正文/BV 读回** 2026-10-18 才实现，尚无真实 rpid 样本 |
+| token 对照实验（目标 ≥60%） | ⚠️ **估算达标（83.7%）**，**未**真实验收（无真实 DSH usage / 无互动对照 / 无人工核对） |
 | **DSH 插件化（可装、设置页、MCP、跑一轮）** | ✅ **通过**（2026-10-16，见 §2.6） |
 | **谷时调度（P0）** | ✅ **通过**（13 项测试 + 真机接口） |
 | **占位日报（P1）** | ✅ **通过**（10 项测试） |
@@ -119,12 +119,17 @@ cd D:/DeepSeek/projects/dsh-bilibili-companion
 | `prepare_batch`/`read_video` 遵守长度与候选数上限 | ✅ | `test_config.py::test_hard_ceiling_candidates_to_dsh`、`::test_hard_ceiling_excerpt_chars`（**配置层**就挡住）；`test_pipeline_and_report.py::test_prepare_batch_caps_cards_at_three`、`::test_batch_respects_char_budget` |
 | 长字幕通过分块/缓存处理 | ✅ | `test_text_worker.py::test_chunk_long_text_respects_limit`；`test_storage.py::test_text_job_cache_key_includes_all_four_parts` |
 | DSH 能按证据 ID 索取短摘录 | ✅ | `test_mcp_protocol.py`（`read_evidence_excerpt` 可调用）、`test_storage.py::test_excerpt_is_bounded`（500 字硬截断） |
-| 对照实验报告真实 token 账本与质量抽检 | ⚠️ **部分** | 见 §5：**架构对照已完成（-83.7%）**，但为**估算口径**，非厂商 tokenizer 实测 |
+| 对照实验报告真实 token 账本与质量抽检 | ⚠️ **未做** | 见 §5：架构估算 −83.7%，但**真实 DSH usage、≥5 互动、人工核对都未采集**；报告标注 `measurement=estimated` |
 | 未达 60% 不得声称"已大幅省钱" | ✅ | 报告中 `meets_60pct_target` 是**派生**值，`test_token_experiment.py::test_meets_target_flag_is_honest` 锁定它不可硬编码 |
 
 ---
 
 ## 2.5b ★ 真实写入：✅ **已验证通过**（2026-10-15）
+
+> ⚠️ **2026-10-18 补注（#4）**：这一节核验的是**@ 目标 UID**与点赞/收藏状态，
+> 不是"发布状态机读回了评论作者/正文/BV"。当时拿到 rpid 就直接标
+> `sent_verified`；`sent_pending_verify` 与作者/正文读回是 2026-10-18 才实现的，
+> 之后**还没有**新的真实评论样本。不要把这一节当成"发布读回已验收"。
 
 本轮做了**首次真实公开写入**，每一项都由 **B站 侧独立回读**确认
 （不是只看接口返回 `code=0`）：
@@ -185,7 +190,7 @@ cd D:/DeepSeek/projects/dsh-bilibili-companion
 | 行归属 | ✅ `dsh-bili-companion` **恰好 1 行**（多行会重复挂载 → 安全模式） |
 | 设置页 | ✅ 主人确认「设置 → B站小号」可见，且不再卡「读设置中」 |
 | 接口 | ✅ `/api/bili-companion/{status,config,report,run}` 全部 HTTP 200 |
-| MCP 工具 | ✅ `mcp__bili_companion__companion_status` 正常（17 个工具） |
+| MCP 工具 | ✅ `mcp__bili_companion__companion_status` 正常（25 个工具） |
 | 「现在跑一轮」 | ✅ 真起子进程，写出日报（`run_62550a909bff44f4`） |
 | 安全模式 | ✅ 修复后**零复发** |
 
@@ -515,7 +520,9 @@ xiaohongshu   未接入   （official_api）
 > **DSH 定时提醒的投递记录不证明 Agent 已完成任务**，以本表为最终事实来源。
 ```
 
-### 4.1 MCP 协议实测证据
+### 4.1 MCP 协议实测证据（历史快照：2026-10-15，当时 14 个工具）
+
+> 现为 **25 个工具**，最新清单见 [`README.md`](../README.md) 的“25 个模型可见工具”。
 
 ```bash
 $ ./.venv/Scripts/python.exe -m cli.app tools
@@ -549,7 +556,7 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 
 ---
 
-## 5. token 对照实验（目标 ≥60%）→ ✅ 达标，但口径是**估算**
+## 5. token 对照实验（目标 ≥60%）→ ⚠️ **估算达标，不是真实验收**（#6）
 
 详见 [`docs/token-experiment.md`](token-experiment.md)。摘要：
 
@@ -564,10 +571,15 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 |---|---|
 | 样本数 | ✅ 10 个视频（含无字幕/长字幕/带 README/评论多等形态） |
 | **≥5 条互动** | ❌ **未纳入对照**（互动路径的 token 未单独记账） |
-| DSH token 降低 ≥60% | ✅ **83.7%** |
-| 证据错误抽检 | ✅ 0 / 0（架构层面：反查拒绝编造） |
+| DSH token 降低 ≥60% | ⚠️ **估算 83.7%**，**不是**厂商 tokenizer / 宿主 usage 实测 |
+| 证据错误抽检 | ❌ **未人工核对**（报告里的 0 是默认值，不得当作零错误） |
+| 真实 DSH usage | ❌ **未采集**（报告标注 `real_dsh_usage=false`） |
 | 计量口径 | ⚠️ **启发式估算**（中文 ≈ 0.6 token/字），**不是厂商 tokenizer 实测** |
 | 真实豆包 usage | ⚠️ 无真实调用（未配密钥）→ 表中豆包数字也是估算；有真实调用时以 `text_jobs` 表为准 |
+
+> **验收结论**：这是**架构对照**，不是任务 8 的真实验收。
+> 报告已显式标注 `measurement=estimated` / `evidence_reviewed=false`；
+> 真验收需要固定样本 + 宿主真实 usage + ≥5 条互动 + 人工核对（见待办）。
 
 > ⚠️ **诚实声明**：这是**架构对照**（原文是否进 DSH 上下文），
 > 样本为确定性生成而非真实抓取。绝对数值会变，但量级差距来自架构本身。
@@ -591,6 +603,28 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 
 ---
 
+## 6.5 2026-10-18 审查整改（Codex issues #1–#9 + PR #10）
+
+> 审查地址：<https://github.com/chzmpro/dsh-bilibili-companion/issues?q=is%3Aissue>
+
+| 项 | 内容 | 状态 | 证据 |
+|---|---|---|---|
+| PR #10 | 干净检出质量门 / 缓存账 / 批处理预算 | ✅ 已合入 | merge commit `74c9aa6` |
+| #7 | 测试绑作者机器、selfcheck 写死 D 盘 | ✅ 已修 | `test_config`/`test_paths`/`test_websearch`/`selfcheck.mjs` |
+| #8 | 缓存命中清零结果与 token 账 | ✅ 已修 | `record_text_job(from_cache=True)` 只标记；`tests/test_text_worker.py` |
+| #9 | 批处理预算覆盖不了发现与在途请求 | ✅ 已修 | `asyncio.timeout` 包住发现与每视频；`tests/test_batch_deadline.py` |
+| #2 | 字幕只处理前 40 段，长视频后半段静默丢失 | ✅ 已修 | 全量入库 + 真分块；`test_subtitle_registers_every_segment_not_just_first_40` |
+| #3 | `max_batch_chars` 只算候选卡，首卡可绕过 | ✅ 已修 | 完整 JSON 预算 + `truncated` 计数；`tests/test_pipeline_and_report.py` |
+| #4 | 仅取得 rpid 就标 `sent_verified` | ✅ 已修（机制） | `sent_pending_verify` + 作者/正文/BV/root 读回；`tests/test_readback.py` |
+| #5 | 写请求 `-412` 不更新全局健康 | ✅ 已修 | `WriteError.http_status` + `health.classify`；`tests/test_write_health.py` |
+| #6 | 合成字符估算被当成真实验收 | ✅ 口径已改 | 报告标注 `measurement=estimated` / `evidence_reviewed=false`；**仍未做真实验收** |
+| #1 | continuous 调度 / DSH 决策 / 主号汇报未闭环 | 📋 **立项，未实现** | [`docs/production-loop-plan.md`](production-loop-plan.md) |
+
+**仍然未验收**：真实评论读回样本（#4 的机制没有真实 rpid 跑过）、
+真实 DSH usage / ≥5 条互动 / 人工证据核对（#6）、生产闭环（#1）。
+
+---
+
 ## 7. 已知限制与未完成项（**汇总**）
 
 ### 7.1 未验收（缺条件）
@@ -607,7 +641,7 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 
 | # | 局限 | 说明 |
 |---|---|---|
-| 1 | **发布后完整核验未做** | 现在只在拿到 `rpid` 时标 `sent_verified`；任务书要求的"核验远端作者/正文/BV"需要真实平台读回，未实现 |
+| 1 | **发布后完整核验未做真实样本** | 机制已实现（`sent_pending_verify` + 作者/正文/BV/root 读回 + `cli.app verify-pending`），但**还没有**真实评论 rpid 跑过 |
 | 2 | **`@` 投递通道未接** | 机制与三态状态机已实现并测试（23 项）；缺一个受限浏览器适配器 → 默认 `unsupported`。见 §3 任务 6 |
 | 3 | **无真实 ASR** | 字幕不可用时降级为 `description_only` 并降分，不编造（任务书允许） |
 | 4 | **B 站 ASR 未调研** | 任务书提到可走上游 ASR，未做 |
@@ -615,7 +649,7 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 | 6 | **数据目录随机器变化** | `%LOCALAPPDATA%` 本机不可写 → 落 `<项目根>/.local-data`；换机器会变，用 `companion_status` 查询 |
 | 7 | **跨平台未验证** | 浏览器探测/`creationflags`/注册表读取都是 Windows 假设 |
 | 8 | **覆盖率未测** | 未装 `pytest-cov` |
-| 9 | **未初始化 git** | 故不声称"已提交"；任务书要求"若仓库非 Git，不要假称已提交" |
+| 9 | **仓库已公开** | 2026-10-18 已从私有切为公开；历史中的作者邮箱与 UID 随之公开（未改写历史） |
 
 ### 7.3 平台与合规限制
 

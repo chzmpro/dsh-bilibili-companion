@@ -13,8 +13,12 @@
 
 ```
 视频入库 115 条 · 有证据 98 · 已打分 98 · 有提炼 37 · 合格(≥75) 37
-schema v13 · dm_inbox 待回复 0
+schema v14 · dm_inbox 待回复 0
 ```
+
+> ★ **2026-10-18 已完成 Codex 审查整改**（#2 字幕全量/分块、#3 整包预算、
+> #4 发布读回 + `sent_pending_verify`、#5 写侧健康传播、#6 token 口径）。
+> 生产闭环（#1）仍是**立项未实现**，见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md)。
 
 **当前红线（一个都没动）**：`mode=observe` · `dry_run=true` · `publish_enabled=false`
 ⇒ **任何公开写入（点赞/收藏/评论）都会被代码层拒绝**。这是设计，不是故障。
@@ -179,16 +183,40 @@ agent.followup({
 
 连打 75 条 view 接口会触发异常判定。**节奏：10 秒/条、每 5 条 20 秒**（主人定的）。
 
+### 5.9 ★ 发布后“查不到”是常态，`sent_pending_verify` 不是失败（#4）
+
+刚发的评论经常因为审核/翻页在第一页看不到。现在拿到 rpid **先落
+`sent_pending_verify`**（已确定发过、占额度、锁幂等键、不重发），
+读回作者/正文/BV/root 全部匹配才升 `sent_verified`。
+
+* 别把“没查到”写成“没发出去”，也别为了凑成功再 POST 一次；
+* 过一会儿跑 `cli.app verify-pending` 只读重试；
+* `publish()` 返回 `OK_PENDING_VERIFY` 是**预期状态**，不是 bug。
+
+### 5.10 ★ bridge 的评论发布路径曾经没有 executor
+
+`publish_draft`/`publish_reply` 以前构造 `PublishGate` 时没传 `executor`，
+所以**即使开了 publish_enabled 也永远 `EXECUTOR_UNAVAILABLE`**。
+2026-10-18 已接上 `_make_write_executor(runtime)`（门禁不变）。
+
+### 5.11 长视频字幕：全量入库 + 模型分块（#2/#3）
+
+* 字幕**全部**片段入库（旧实现只取前 40 段，后面的连证据都没有）；
+* 豆包输入按 `CHUNK_MAX_CHARS=4000` 分块，最多 6 块，超出等距抽样并标
+  `MODEL_INPUT_SAMPLED`；部分块失败标 `MODEL_CHUNK_FAILED_n` 并强制深审；
+* DSH 返回的 `max_batch_chars` 现在按**完整 JSON** 计算，首卡也受限；
+  截断数量在 `truncated` 字段里（`batch_chars` 等于最终序列化长度）。
+
 ---
 
 ## 6. 未完成的事（按优先级）
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **定时器** | 复用 dm-watch 进程，每 30 分钟跑一轮（搜索+推荐流+打分+补全+提炼+投递）。现在 `schedule.continuous/30分钟` 只是配置，**没有执行器**，所有 runs 都是 `trigger_source=manual` |
-| 2 | **完整跑一次推荐链路** | ①→⑥ 各脚本都写好了、单独验证过，但**没串起来跑过**（除了手动投递测试） |
-| 3 | **评论区 @** | `core/mention.py::try_mention()` 写得很完整，但**生产代码零调用**（只在 tests 里）。主人说"代码做完了只是没开"，需确认开关在哪并接上 |
-| 4 | **推荐流自动跑** | `trends_suggest` 只有 2 条记录，都是手动 |
+| 1 | **生产闭环（#1）** | 定时器、DSH 决策回收、主号汇报串成 `run_cycle`。**已立项未实现**，见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md) |
+| 2 | **真实评论读回样本（#4）** | 机制已实现（`sent_pending_verify` + `cli.app verify-pending`），但还没有真实 rpid 跑过 |
+| 3 | **token 真实验收（#6）** | 当前只有架构估算；真实 DSH usage / ≥5 条互动 / 人工证据核对都未采集 |
+| 4 | **评论区 @** | `core/mention.py::try_mention()` 写得很完整，但**生产代码零调用**（只在 tests 里）。主人说"代码做完了只是没开"，需确认开关在哪并接上 |
 | 5 | **免打扰时段** | 参考项目有 `sleep_start/sleep_end`（02:00-08:00），我们没有 |
 | 6 | **人设化推荐语未验证** | `scripts/generate_recommendations.py` 写好了但没跑过（后来改成投递给值班员写，这条可能不需要了） |
 
@@ -214,6 +242,7 @@ agent.followup({
 
 # 验证与修复
 ./.venv/Scripts/python.exe -u scripts/verify_deliver.py --session <sid> --check-only
+./.venv/Scripts/python.exe -m cli.app verify-pending                       # 只读重试待核验评论
 node scripts/fix_session_role_v2.mjs <session.v4.jsonl.zstd>
 
 # 自检
@@ -307,7 +336,9 @@ topic 是绝对主导 ——「这条内容的主题，是不是主人会主动�
 
 1. 跑一遍 `pytest` + `ruff` + `mypy` + `node selfcheck.mjs`，确认基线绿
 2. 看 `$DSH_HOME/bili-companion/watch.log` 和 `curl 127.0.0.1:8848/status`，确认监听活着
-3. **问主人下一步做哪件**（第 6 节那 6 项），别自己挑
+3. 先读 [`docs/acceptance.md`](docs/acceptance.md) §6.5（审查整改状态）与
+   [`docs/production-loop-plan.md`](docs/production-loop-plan.md)（#1 立项），
+   再**问主人下一步做哪件**（第 6 节），别自己挑
 
 ---
 

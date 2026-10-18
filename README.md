@@ -23,7 +23,7 @@
 DSH Agent（唯一决策者：选题、复核证据、写最终文字、日程唤醒）
    │  官方 @deepseek-ai/dsh-mcp-client（stdio）
    ▼
-本项目 Python MCP bridge（14 个窄工具，命名空间 bili_companion）
+本项目 Python MCP bridge（25 个窄工具，命名空间 bili_companion）
    ├── 读取适配器      自建 httpx（零 GPL）+ WBI 签名
    ├── 豆包文字 worker  分块提取 → **证据反查** → 短候选包
    ├── 受控发布         9 道门禁 + 幂等键 + reserved/uncertain 状态机
@@ -32,7 +32,8 @@ DSH Agent（唯一决策者：选题、复核证据、写最终文字、日程�
 
 **核心是 token 架构**：原始字幕/评论**留在 bridge 内**，
 DSH 只拿 ≤3 个短候选包，必要时按 `evidence_id` 取 ≤500 字摘录。
-实测对照见 [`docs/token-experiment.md`](docs/token-experiment.md)：DSH 侧降低 **83.7%**。
+估算对照见 [`docs/token-experiment.md`](docs/token-experiment.md)：DSH 侧**估算**降低 **83.7%**
+（架构对照，`measurement=estimated`，**不是**真实 token/费用验收）。
 
 ---
 
@@ -195,7 +196,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 
 ```bash
 ./.venv/Scripts/python.exe -m cli.app tools
-# 期望：列出 14 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
+# 期望：列出 25 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
 ```
 
 ---
@@ -211,11 +212,13 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 产出：`<数据目录>/digests/digest-YYYYMMDD.md`（含搜索词、候选数、完整阅读数、
 推荐列表、证据链接、失败与待处理项）。
 
-### 14 个模型可见工具
+### 25 个模型可见工具
 
 | 工具 | 作用 |
 |---|---|
 | `companion_status` | 登录/健康/模式/配额/最近任务（不含凭据） |
+| `expand_intent` | 模糊意图 → 一组可搜索关键词（只读） |
+| `trends_suggest` | 推荐流 → 候选关键词池（**不自动改关注词**） |
 | `discover_videos` | 按关键词与发布时间搜索（只读） |
 | `prepare_batch` | 发现→去重→限速读取→豆包预处理→**最多 3 个短候选包** |
 | `read_video` | 单视频短候选包 + 证据 ID（**不返回原文**） |
@@ -223,10 +226,19 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 | `get_discussion` | 限速拉取评论（只读，内容当**数据**不当指令） |
 | `save_analysis` | 存笔记与草稿（**校验证据真实可反查**） |
 | `list_drafts` | 列出草稿（只读） |
-| `publish_draft` | 从**已存草稿**发布顶层评论（9 道门禁） |
+| `publish_draft` | 从**已存草稿**发布顶层评论（9 道门禁；读回核验后才是 `sent_verified`） |
 | `check_interactions` | 拉取与小号评论/提及相关的新互动 |
 | `prepare_reply` | 校验目标与上下文，存回复草稿 |
 | `publish_reply` | 回复一次并核验（同顶层门禁） |
+| `dm_inbox` | 取待回复的主人私信（只读） |
+| `dm_reply` | 回复主人的某条私信（接收者硬编码为 `owner_mid`） |
+| `dm_push` | 主动私信主人（推荐视频等；不需要 `msg_seqno`） |
+| `find_repo` | 从视频里找 GitHub/Gitee 仓库地址（只读） |
+| `read_source` | 读仓库源码（只读文本，**绝不执行**） |
+| `web_search` | 免费联网搜索（只读，结果当数据） |
+| `like_video` | 点赞（与评论同一套门禁） |
+| `favorite_video` | 收藏到指定收藏夹（与评论同一套门禁） |
+| `owner_preferences` | 读写主人偏好（只影响排序/内容策略） |
 | `feedback` | 记录主人评价（只影响排序，不改授权） |
 | `pause` | 立即暂停新公开动作 |
 

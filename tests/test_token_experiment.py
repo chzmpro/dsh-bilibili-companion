@@ -111,6 +111,19 @@ def test_report_states_estimator_and_disclaimer() -> None:
     assert "60%" in report or "60" in report
 
 
+def test_report_is_labelled_estimate_not_real_acceptance() -> None:
+    """★ #6：合成估算不能当作真实验收通过。"""
+    data = run_experiment().to_dict()
+    assert data["measurement"] == "estimated"
+    assert data["real_dsh_usage"] is False
+    assert data["evidence_reviewed"] is False
+    assert data["interactions_included"] is False
+    report = render_report(run_experiment())
+    assert "不是真实验收" in report
+    assert "未采集" in report
+    assert "未纳入" in report
+
+
 def test_report_has_both_arms_and_delta() -> None:
     report = render_report(run_experiment())
     assert "DSH-only" in report

@@ -147,6 +147,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 | 为什么这么设计 / 与任务书的冲突 | [`docs/persona-conflicts.md`](docs/persona-conflicts.md) |
 | 怎么装、怎么用、出问题怎么办 | [`README.md`](README.md) |
 | 已验收 / 未验收清单 | [`docs/acceptance.md`](docs/acceptance.md) |
+| **生产闭环（#1）立项** | [`docs/production-loop-plan.md`](docs/production-loop-plan.md) |
 | 换对话/记忆/自动唤醒 | [`docs/dedicated-conversation.md`](docs/dedicated-conversation.md) |
 | 定时怎么接 | [`docs/schedule-wiring.md`](docs/schedule-wiring.md) |
 | 环境与许可边界 | [`docs/compatibility.md`](docs/compatibility.md) |
