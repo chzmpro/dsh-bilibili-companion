@@ -263,7 +263,107 @@ async def test_batch_respects_char_budget(db: Database, clock: FakeClock) -> Non
 
     batch = await pipeline.prepare_batch(keywords=["DSH"])
     payload = batch.to_payload(max_batch_chars=1200)
-    assert payload["batch_chars"] <= 1200 * 2, "批次必须受字符预算约束"
+    assert payload["batch_chars"] == len(json.dumps(payload, ensure_ascii=False))
+    assert len(json.dumps(payload, ensure_ascii=False)) <= 1200, "整包 JSON 必须受预算约束"
+
+
+# ---------------------------------------------------------------------------
+# ★ #3（Codex 审查）：字符预算必须按完整返回对象计算，首卡也受限
+# ---------------------------------------------------------------------------
+
+
+def test_budget_limits_complete_payload_even_with_huge_first_card() -> None:
+    """首张卡不能无条件放行；整包长度（不是候选卡之和）才是预算口径。"""
+    from core.pipeline import BatchResult
+    from core.text_worker import CandidateCard
+
+    huge = CandidateCard(
+        bvid="BV1huge00001", aid=1, title="标" * 3000, source_url="u",
+        evidence_level="subtitle", candidate_comment="评" * 5000,
+        uncertainties=["疑" * 500] * 10,
+    )
+    payload = BatchResult(candidates=[huge]).to_payload(max_batch_chars=600)
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert len(serialized) <= 600
+    assert payload["batch_chars"] == len(serialized)
+    # 放不下就必须**整张降级/跳过并报数**，不能假装覆盖
+    if not payload["candidates"]:
+        assert payload["truncated"].get("candidates") == 1
+
+
+def test_budget_counts_evidence_ids_and_reports_truncation() -> None:
+    """1000 个 evidence_id 不能绕过预算，也不能静默消失。"""
+    from core.pipeline import BatchResult
+
+    batch = BatchResult(evidence_ids=[f"ev_{i:012d}" for i in range(1000)])
+    payload = batch.to_payload(max_batch_chars=500)
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert len(serialized) <= 500
+    assert payload["batch_chars"] == len(serialized)
+    assert payload["truncated"]["evidence_ids"] > 0
+    assert payload["truncated"]["evidence_ids"] + len(payload["evidence_ids"]) == 1000
+
+
+def test_budget_truncation_is_stable_and_does_not_mutate() -> None:
+    """同一对象重复序列化结果稳定；**不许**往 limitations 里追加。"""
+    from core.pipeline import BatchResult
+    from core.text_worker import CandidateCard
+
+    batch = BatchResult(
+        candidates=[
+            CandidateCard(bvid=f"BV1{k}", aid=k, title="题" * 600, source_url="u",
+                          evidence_level="subtitle")
+            for k in range(3)
+        ],
+        limitations=["ORIGINAL"],
+    )
+    first = batch.to_payload(max_batch_chars=700)
+    second = batch.to_payload(max_batch_chars=700)
+    assert first == second
+    assert batch.limitations == ["ORIGINAL"]
+    assert json.dumps(first, ensure_ascii=False) == json.dumps(second, ensure_ascii=False)
+
+
+async def test_subtitle_registers_every_segment_not_just_first_40(
+    db: Database, clock: FakeClock
+) -> None:
+    """★ #2（Codex 审查）：长视频后半段不能被静默丢掉。
+
+    * 全部片段都要入库（否则 `read_evidence_excerpt` 也取不回）；
+    * 分块后的模型输入必须能覆盖到最后一段。
+    """
+    segments = [
+        {"from": float(i), "to": float(i + 1), "content": f"第{i}段内容"}
+        for i in range(100)
+    ]
+    segments[-1]["content"] = "最后一段的关键结论：证据反查必须能到达这里"
+    base = default_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "aisubtitle" in str(request.url):
+            return httpx.Response(200, json={"body": segments})
+        return base(request)
+
+    reader = make_reader(db, handler, clock)
+    pipeline = make_pipeline(db, reader, clock)
+    await pipeline.discover(keywords=["DSH"])
+    _card, blocks = await pipeline.read_video("BV1test00001")
+
+    rows = db.evidence_for_bvid("BV1test00001")
+    assert len(rows) == 101, "简介 1 条 + 字幕 100 段都要入库"
+    assert "最后一段的关键结论：证据反查必须能到达这里" in {
+        str(row["text"]) for row in rows
+    }
+
+    from core.text_worker import chunk_evidence_blocks
+
+    chunks, sampled = chunk_evidence_blocks(blocks)
+    assert sampled == 0, "100 段不应该触发抽样"
+    assert any(
+        "最后一段的关键结论" in str(block["text"])
+        for chunk in chunks
+        for block in chunk
+    ), "最后一段必须进入某一分块，而不是被截掉"
 
 
 async def test_skipped_videos_are_recorded_not_silently_dropped(

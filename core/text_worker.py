@@ -285,6 +285,120 @@ def chunk_text(text: str, *, max_chars: int = CHUNK_MAX_CHARS) -> list[str]:
     return chunks
 
 
+#: 单次豆包调用最多带多少字符证据。超过就**真正分块**（不是静默截断）。
+MODEL_CHUNK_CHARS = CHUNK_MAX_CHARS
+
+#: 单条视频最多分几块。超过上限时**等距抽样**并在 limitations 里明说，
+#: 绝不把"只看了抽样"说成"看完全文"。
+MAX_MODEL_CHUNKS = 6
+
+
+def chunk_evidence_blocks(
+    evidence_blocks: list[dict[str, Any]],
+    *,
+    max_chars: int = MODEL_CHUNK_CHARS,
+    max_chunks: int = MAX_MODEL_CHUNKS,
+) -> tuple[list[list[dict[str, Any]]], int]:
+    """按字符预算把证据切块，返回 ``(块列表, 抽样前的总块数)``。
+
+    第二个返回值非 0 表示块数超过 ``max_chunks``、做了**等距抽样**：
+    调用方必须把它写进 limitations，并让候选包进入深审 —— 不能默认
+    "模型看的是全文"。
+
+    长证据（例如整篇 ASR 转写）会按 ``max_chars`` 切开，但**沿用同一个
+    ``evidence_id``**：引文仍然能反查回同一行原文，只是分段送给模型。
+    """
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    used = 0
+    for block in evidence_blocks:
+        text = str(block.get("text", "") or "")
+        pieces = chunk_text(text, max_chars=max_chars) if text else [""]
+        for piece in pieces:
+            piece_len = len(piece)
+            if current and used + piece_len > max_chars:
+                chunks.append(current)
+                current = []
+                used = 0
+            current.append({**block, "text": piece})
+            used += piece_len
+            if used >= max_chars:
+                chunks.append(current)
+                current = []
+                used = 0
+    if current:
+        chunks.append(current)
+
+    total = len(chunks)
+    limit = max(2, int(max_chunks))
+    if total > limit:
+        step = (total - 1) / (limit - 1)
+        indexes = sorted({int(round(i * step)) for i in range(limit)})
+        return [chunks[index] for index in indexes], total
+    return chunks, 0
+
+
+def _chunk_rank(parsed: dict[str, Any]) -> int:
+    """块结果排序信号：优先 topic 分项，其次旧的 relevance_score。"""
+    scores = parsed.get("scores")
+    if isinstance(scores, dict):
+        topic = _clamp_score(scores.get("topic"))
+        if topic is not None:
+            return topic
+    return _clamp_score(parsed.get("relevance_score")) or 0
+
+
+def merge_chunk_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """把多块模型的输出合并成**一份**待反查的解析结果。
+
+    合并规则（写在这里，避免"看起来覆盖全文、其实只取了最后一块"）：
+
+    * ``key_points``：全部块的要点取并集（按 evidence_id + 引文去重）；
+    * ``scores`` / ``candidate_comment``：取 **topic 最高的那一块** ——
+      长视频的无关开场不应该把整条视频的分数拖低；
+    * ``needs_deep_review``：任一块要求深审即为真；
+    * ``uncertainties``：取并集，最多 8 条。
+    """
+    best = max(results, key=_chunk_rank)
+    points: list[Any] = []
+    seen_points: set[tuple[str, str]] = set()
+    uncertainties: list[str] = []
+    seen_uncertainties: set[str] = set()
+    needs_review = False
+
+    for parsed in results:
+        needs_review = needs_review or bool(parsed.get("needs_deep_review"))
+        raw_points = parsed.get("key_points")
+        if isinstance(raw_points, list):
+            for point in raw_points:
+                if not isinstance(point, dict):
+                    continue
+                key = (
+                    str(point.get("evidence_id", "") or ""),
+                    _normalize_for_match(str(point.get("short_quote", "") or ""))[:40],
+                )
+                if key in seen_points:
+                    continue
+                seen_points.add(key)
+                points.append(point)
+        raw_uncertainties = parsed.get("uncertainties")
+        if isinstance(raw_uncertainties, list):
+            for item in raw_uncertainties:
+                text = str(item)
+                if text and text not in seen_uncertainties:
+                    seen_uncertainties.add(text)
+                    uncertainties.append(text)
+
+    return {
+        "key_points": points[:12],
+        "scores": best.get("scores"),
+        "relevance_score": best.get("relevance_score"),
+        "candidate_comment": best.get("candidate_comment", ""),
+        "uncertainties": uncertainties[:8],
+        "needs_deep_review": needs_review,
+    }
+
+
 def input_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -673,6 +787,14 @@ class TextWorker:
             )
 
         combined = "\n".join(str(b["text"]) for b in evidence_blocks)
+        # ★ 2026-10-18：长视频不再"前 40 段之后静默丢弃"。
+        #   所有证据都已经登记在库里；这里按预算**分块送模型**，
+        #   块数超上限才等距抽样 —— 且一定要在 limitations 里说出来。
+        model_chunks, sampled_from = chunk_evidence_blocks(evidence_blocks)
+        if len(model_chunks) > 1:
+            limitations.append(f"MODEL_INPUT_CHUNKS_{len(model_chunks)}")
+        if sampled_from:
+            limitations.append(f"MODEL_INPUT_SAMPLED_{len(model_chunks)}_OF_{sampled_from}")
         digest = input_sha256(self._user_prompt(
             title=title, evidence_blocks=evidence_blocks, focus=focus
         ))
@@ -709,9 +831,22 @@ class TextWorker:
                     evidence_text=combined,
                 )
 
-        parsed, error_code, usage = await self._call_model(
-            title=title, evidence_blocks=evidence_blocks, focus=focus
-        )
+        if len(model_chunks) > 1:
+            parsed, error_code, usage, failed_chunks = await self._call_model_chunks(
+                title=title, chunks=model_chunks, focus=focus
+            )
+            if failed_chunks:
+                limitations.append(f"MODEL_CHUNK_FAILED_{failed_chunks}")
+                if parsed is not None:
+                    parsed = {**parsed, "needs_deep_review": True}
+        else:
+            parsed, error_code, usage = await self._call_model(
+                title=title, evidence_blocks=evidence_blocks, focus=focus
+            )
+            failed_chunks = 0
+        if sampled_from and parsed is not None:
+            # 抽样过的内容**不能**当作全文判断 —— 交给 DSH 深审
+            parsed = {**parsed, "needs_deep_review": True}
 
         if parsed is None:
             self.db.record_text_job(
@@ -934,6 +1069,44 @@ class TextWorker:
             return parsed, None, usage
 
         return None, last_error, usage
+
+    async def _call_model_chunks(
+        self,
+        *,
+        title: str,
+        chunks: list[list[dict[str, Any]]],
+        focus: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None, dict[str, int], int]:
+        """逐块调用模型并合并。
+
+        返回 ``(merged, error_code, usage, failed_chunks)``：
+        部分块失败时仍返回成功块的合并结果，但 ``failed_chunks > 0``
+        —— 调用方必须据此标记 ``needs_deep_review``，不能把部分覆盖当全文。
+        """
+        results: list[dict[str, Any]] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        last_error: str | None = None
+        failed = 0
+        for chunk in chunks:
+            parsed, error_code, usage = await self._call_model(
+                title=title, evidence_blocks=chunk, focus=focus
+            )
+            prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+            if parsed is None:
+                failed += 1
+                last_error = error_code
+                continue
+            results.append(parsed)
+
+        usage_total = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+        if not results:
+            return None, last_error or "TEXT_WORKER_FAILED", usage_total, failed
+        return merge_chunk_results(results), None, usage_total, failed
 
 
 #: 错误码 → ``text_jobs.status``（受 schema CHECK 约束的枚举）

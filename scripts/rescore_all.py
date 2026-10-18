@@ -64,7 +64,9 @@ from core.storage import Database  # noqa: E402
 from core.text_worker import TextWorker  # noqa: E402
 
 #: 每个视频喂给模型的最大证据条数（简介优先，其次字幕/评论）。
-MAX_EVIDENCE = 8
+#: ★ 2026-10-18：从 8 提到 200。旧值会让长视频的后半段永远不参与重算；
+#: 真正的模型输入预算由 ``text_worker.chunk_evidence_blocks`` 按字符分块。
+MAX_EVIDENCE = 200
 
 #: 私信字数上限（B 站私信限制）。
 DM_LIMIT = 500

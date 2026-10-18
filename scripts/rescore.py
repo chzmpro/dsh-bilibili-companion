@@ -49,9 +49,10 @@ from core.text_worker import TextWorker  # noqa: E402
 
 #: 每个视频取多少条证据喂给模型。
 #:
-#: ★ 取太多会稀释重点（模型容易抓"字数最多的那段"而不是"最关键的一段"），
-#:   实测 8 条足够覆盖简介 + 关键字幕。
-MAX_EVIDENCE = 8
+#: ★ 2026-10-18：从 8 提到 200。旧值只覆盖简介 + 开头几条字幕，长视频后半段
+#:   永远不参与重算；真正的模型输入预算改由 ``chunk_evidence_blocks`` 按字符分块，
+#:   不再靠"少取几条"控制成本。
+MAX_EVIDENCE = 200
 
 
 def collect(db: Database, bvid: str) -> dict[str, Any]:

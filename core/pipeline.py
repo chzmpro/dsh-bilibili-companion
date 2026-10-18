@@ -41,8 +41,58 @@ LEVEL_ASR = "asr"
 LEVEL_DESCRIPTION_ONLY = "description_only"
 LEVEL_UNAVAILABLE = "unavailable"
 
-#: 每个候选包最多配几条证据给豆包（控制成本）
-MAX_EVIDENCE_PER_VIDEO = 40
+#: ``to_payload`` 里诊断列表最多保留多少条（超出用 ``truncated`` 报数）
+_PAYLOAD_DIAG_CAP = 10
+#: limitations 最多保留多少条 / 每条最多多少字符
+_PAYLOAD_LIMITATIONS_CAP = 20
+_PAYLOAD_LIMITATION_CHARS = 200
+#: 给 ``batch_chars`` 自身数字预留的长度
+_PAYLOAD_RESERVE = 16
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _shrink_card_payload(payload: dict[str, Any], level: int) -> dict[str, Any]:
+    """按字段语义逐级缩短候选卡（**不截断 JSON 字符串**）。
+
+    level 0 = 原样；1/2/3 = 越来越短的档位。缩短时要如实增加
+    ``dropped_points``，不能让 DSH 以为要点就这么几条。
+    """
+    if level <= 0:
+        return payload
+    title_chars, comment_chars, point_cap, uncertainty_cap, item_chars = {
+        1: (160, 300, 5, 3, 120),
+        2: (80, 120, 3, 1, 80),
+        3: (40, 40, 1, 0, 60),
+    }.get(level, (40, 40, 1, 0, 60))
+    shrunk = {**payload}
+    shrunk["title"] = _truncate_text(str(shrunk.get("title", "")), title_chars)
+    shrunk["candidate_comment"] = _truncate_text(
+        str(shrunk.get("candidate_comment", "")), comment_chars
+    )
+    uncertainties = [str(item) for item in list(shrunk.get("uncertainties") or [])]
+    shrunk["uncertainties"] = [
+        _truncate_text(item, item_chars) for item in uncertainties[:uncertainty_cap]
+    ]
+    points = list(shrunk.get("key_points") or [])
+    if len(points) > point_cap:
+        shrunk["dropped_points"] = int(shrunk.get("dropped_points") or 0) + (
+            len(points) - point_cap
+        )
+        shrunk["key_points"] = points[:point_cap]
+    shrunk["limitations"] = [
+        _truncate_text(str(item), item_chars)
+        for item in list(shrunk.get("limitations") or [])[:point_cap]
+    ]
+    return shrunk
 
 
 @dataclass
@@ -73,29 +123,117 @@ class BatchResult:
     limitations: list[str] = field(default_factory=list)
 
     def to_payload(self, *, max_batch_chars: int) -> dict[str, Any]:
-        """裁剪到整批字符上限后返回。**不足则原样返回。**"""
-        result: list[dict[str, Any]] = []
-        used = 0
-        for card in self.candidates:
-            payload = card.to_payload()
-            size = len(json.dumps(payload, ensure_ascii=False))
-            if result and used + size > max_batch_chars:
-                self.limitations.append(f"BATCH_CHAR_LIMIT_DROPPED_{card.bvid}")
-                continue
-            result.append(payload)
-            used += size
-        return {
-            "candidates": result,
-            "skipped": self.skipped,
-            "failed": self.failed,
-            "evidence_ids": self.evidence_ids,
-            "read_bvids": self.read_bvids,
-            "deferred_bvids": self.deferred_bvids,
+        """把整批收进 ``max_batch_chars`` 上限内，并**如实**报告截断。
+
+        与旧实现不同：
+
+        * 预算按**完整 JSON** 计算（含 evidence_ids / skipped / failed /
+          limitations），不是只算候选卡；
+        * **首张卡同样受限制**（旧实现会无条件放行第一张）；
+        * 方法**不修改** ``self``，同一对象多次调用结果稳定；
+        * 截断必须出现在 ``truncated`` 计数里，绝不"报 0 却传出万字"。
+        """
+        budget = max(1, int(max_batch_chars))
+        truncated: dict[str, int] = {}
+
+        limitations = [str(item) for item in self.limitations]
+        if len(limitations) > _PAYLOAD_LIMITATIONS_CAP:
+            truncated["limitations"] = len(limitations) - _PAYLOAD_LIMITATIONS_CAP
+            limitations = limitations[:_PAYLOAD_LIMITATIONS_CAP]
+        limitations = [_truncate_text(item, _PAYLOAD_LIMITATION_CHARS) for item in limitations]
+
+        skipped = list(self.skipped)
+        if len(skipped) > _PAYLOAD_DIAG_CAP:
+            truncated["skipped"] = len(skipped) - _PAYLOAD_DIAG_CAP
+            skipped = skipped[:_PAYLOAD_DIAG_CAP]
+        failed = list(self.failed)
+        if len(failed) > _PAYLOAD_DIAG_CAP:
+            truncated["failed"] = len(failed) - _PAYLOAD_DIAG_CAP
+            failed = failed[:_PAYLOAD_DIAG_CAP]
+
+        payload: dict[str, Any] = {
+            "candidates": [],
+            "skipped": skipped,
+            "failed": failed,
+            "evidence_ids": list(self.evidence_ids),
+            "read_bvids": list(self.read_bvids),
+            "deferred_bvids": list(self.deferred_bvids),
             "elapsed_seconds": round(self.elapsed_seconds, 1),
-            "cache_stats": self.cache_stats,
-            "limitations": self.limitations,
-            "batch_chars": used,
+            "cache_stats": dict(self.cache_stats),
+            "limitations": limitations,
+            "truncated": truncated,
+            "batch_chars": 0,
         }
+
+        def size() -> int:
+            payload["batch_chars"] = 0
+            return _json_size(payload)
+
+        # ① 先让诊断部分自己进预算（候选卡还没加）
+        while size() > budget - _PAYLOAD_RESERVE:
+            if payload["evidence_ids"]:
+                drop = max(1, len(payload["evidence_ids"]) // 2)
+                truncated["evidence_ids"] = truncated.get("evidence_ids", 0) + drop
+                payload["evidence_ids"] = payload["evidence_ids"][:-drop]
+            elif payload["skipped"]:
+                drop = max(1, len(payload["skipped"]) // 2)
+                truncated["skipped"] = truncated.get("skipped", 0) + drop
+                payload["skipped"] = payload["skipped"][:-drop]
+            elif payload["failed"]:
+                drop = max(1, len(payload["failed"]) // 2)
+                truncated["failed"] = truncated.get("failed", 0) + drop
+                payload["failed"] = payload["failed"][:-drop]
+            elif payload["limitations"]:
+                truncated["limitations"] = truncated.get("limitations", 0) + 1
+                payload["limitations"] = payload["limitations"][:-1]
+            elif payload["deferred_bvids"]:
+                truncated["deferred_bvids"] = truncated.get("deferred_bvids", 0) + 1
+                payload["deferred_bvids"] = payload["deferred_bvids"][:-1]
+            elif payload["read_bvids"]:
+                truncated["read_bvids"] = truncated.get("read_bvids", 0) + 1
+                payload["read_bvids"] = payload["read_bvids"][:-1]
+            elif payload["cache_stats"]:
+                truncated["cache_stats"] = len(payload["cache_stats"])
+                payload["cache_stats"] = {}
+            else:
+                # 极端配置（预算小到连骨架都放不下）—— 明确标记，不再无限循环
+                truncated["emergency"] = 1
+                break
+
+        # ② 再加候选卡：首张也受限制；放不下就先语义缩短，仍放不下就整张跳过
+        dropped_candidates = 0
+        for card in self.candidates:
+            added = False
+            for level in (0, 1, 2, 3):
+                candidate = _shrink_card_payload(card.to_payload(), level)
+                payload["candidates"].append(candidate)
+                if size() <= budget - _PAYLOAD_RESERVE:
+                    added = True
+                    break
+                payload["candidates"].pop()
+            if not added:
+                dropped_candidates += 1
+        if dropped_candidates:
+            truncated["candidates"] = dropped_candidates
+
+        # ③ batch_chars 必须等于**最终整包**的长度（含自身数字），取不动点
+        for _ in range(4):
+            measured = _json_size(payload)
+            if payload["batch_chars"] == measured:
+                break
+            payload["batch_chars"] = measured
+
+        # ④ 兜底：数字位增长或 Unicode 转义让最后一刻超限时，宁可少给一张卡
+        while _json_size(payload) > budget and payload["candidates"]:
+            payload["candidates"].pop()
+            truncated["candidates"] = truncated.get("candidates", 0) + 1
+            for _ in range(2):
+                measured = _json_size(payload)
+                if payload["batch_chars"] == measured:
+                    break
+                payload["batch_chars"] = measured
+
+        return payload
 
 
 class Pipeline:
@@ -231,8 +369,11 @@ class Pipeline:
             limitations.append(f"SUBTITLE_{exc.code}")
 
         if subtitle is not None and subtitle.segments:
-            # ★ 时间戳随片段一起登记，供豆包给出 start_sec 后反查
-            for segment in subtitle.segments[:MAX_EVIDENCE_PER_VIDEO]:
+            # ★ 时间戳随片段一起登记，供豆包给出 start_sec 后反查。
+            #   **全部登记**：旧实现只取前 40 段，长视频后半部分连证据都没有，
+            #   豆包看不到、DSH 也反查不到 —— 而且不会有任何提示。
+            #   模型侧的预算由 text_worker.chunk_evidence_blocks 负责。
+            for segment in subtitle.segments:
                 eid = self.db.add_evidence(
                     bvid=bvid,
                     source_type="subtitle",

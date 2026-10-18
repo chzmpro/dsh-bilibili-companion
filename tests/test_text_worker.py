@@ -19,6 +19,7 @@ from core.text_worker import (
     PROMPT_VERSION,
     CandidateCard,
     TextWorker,
+    chunk_evidence_blocks,
     chunk_text,
     input_sha256,
     verify_key_points,
@@ -92,6 +93,164 @@ def test_chunk_long_text_respects_limit() -> None:
 def test_input_hash_is_stable() -> None:
     assert input_sha256("abc") == input_sha256("abc")
     assert input_sha256("abc") != input_sha256("abd")
+
+
+# ---------------------------------------------------------------------------
+# ★ #2（Codex 审查）：长证据要**真正分块**，不能只取前 N 段
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_evidence_blocks_splits_by_budget_and_keeps_order() -> None:
+    blocks = [
+        {"evidence_id": f"ev_{i:03d}", "source_type": "subtitle",
+         "start_sec": float(i), "text": "字" * 300}
+        for i in range(20)
+    ]
+    chunks, sampled = chunk_evidence_blocks(blocks, max_chars=1000, max_chunks=50)
+    assert sampled == 0
+    assert sum(len(chunk) for chunk in chunks) == 20
+    assert all(sum(len(item["text"]) for item in chunk) <= 1000 for chunk in chunks)
+    flattened = [item["evidence_id"] for chunk in chunks for item in chunk]
+    assert flattened == [item["evidence_id"] for item in blocks], "顺序必须保持"
+
+
+def test_chunk_evidence_blocks_splits_one_long_asr_block() -> None:
+    """整篇 ASR 转写是一个超长块 → 切开后仍引用同一个 evidence_id。"""
+    text = "转写内容" * 1250  # 5000 字
+    chunks, sampled = chunk_evidence_blocks(
+        [{"evidence_id": "ev_asr", "source_type": "asr", "start_sec": None, "text": text}],
+        max_chars=1000,
+    )
+    assert sampled == 0
+    assert len(chunks) == 5
+    assert all(item["evidence_id"] == "ev_asr" for chunk in chunks for item in chunk)
+    assert "".join(item["text"] for chunk in chunks for item in chunk) == text
+
+
+def test_chunk_evidence_blocks_samples_beyond_chunk_cap() -> None:
+    blocks = [
+        {"evidence_id": f"ev_{i:03d}", "source_type": "subtitle", "text": "字" * 300}
+        for i in range(12)
+    ]
+    chunks, sampled = chunk_evidence_blocks(blocks, max_chars=300, max_chunks=3)
+    assert sampled == 12, "超过上限必须报告抽样前的总块数"
+    assert len(chunks) == 3
+    ids = [item["evidence_id"] for chunk in chunks for item in chunk]
+    assert ids[0] == "ev_000" and ids[-1] == "ev_011", "首尾必须被保留"
+
+
+@pytest.mark.parametrize("change", ["none", "title", "focus"])
+async def test_analyze_chunks_long_evidence_and_caches_merged_result(
+    db: Database, evidence_setup: dict[str, str], monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """长证据走分块；合并结果可缓存，且最后一段的要点不会丢。"""
+    monkeypatch.setattr("core.text_worker.resolve_secret", lambda _n: "fake-key")
+    db.upsert_video(bvid="BV1long00001", aid=222, title="长视频")
+    rows = []
+    for index in range(3):
+        text = f"第{index}块内容。" + "填充" * 700
+        rows.append(
+            db.add_evidence(
+                bvid="BV1long00001",
+                source_type="subtitle",
+                text=text,
+                start_sec=float(index * 10),
+            )
+        )
+    db.add_evidence(bvid="BV1long00001", source_type="subtitle",
+                    text="最后一段的关键结论：证据反查必须能到达这里", start_sec=99.0)
+    last = db.evidence_for_bvid("BV1long00001")[-1]
+    blocks = [
+        {"evidence_id": str(row["evidence_id"]), "source_type": str(row["source_type"]),
+         "start_sec": row["start_sec"], "text": str(row["text"])}
+        for row in db.evidence_for_bvid("BV1long00001")
+    ]
+
+    first_reply = {
+        "key_points": [
+            {"claim": "第一块要点", "evidence_id": rows[0],
+             "short_quote": "第0块内容", "start_sec": 0.0}
+        ],
+        "scores": {"topic": 10, "usefulness": 10, "novelty": 10, "evidence": 10},
+        "candidate_comment": "第一块评论",
+    }
+    last_reply = {
+        "key_points": [
+            {"claim": "最后一段的关键结论", "evidence_id": str(last["evidence_id"]),
+             "short_quote": "最后一段的关键结论", "start_sec": 99.0}
+        ],
+        "scores": {"topic": 90, "usefulness": 90, "novelty": 90, "evidence": 90},
+        "candidate_comment": "最后一段评论",
+    }
+    worker = worker_with(db, [model_reply(first_reply), model_reply(last_reply)])
+    args: dict[str, Any] = {
+        "bvid": "BV1long00001", "aid": 222, "title": "长视频", "source_url": "u",
+        "evidence_level": "subtitle", "evidence_blocks": blocks,
+        "focus": {"keywords": ["DSH"]},
+    }
+    if change == "title":
+        args["title"] = "改过的标题"
+    elif change == "focus":
+        args["focus"] = {"keywords": ["别的东西"]}
+
+    card = await worker.analyze(**args)
+    assert "MODEL_INPUT_CHUNKS_2" in card.limitations
+    assert card.relevance_score == 90, "合并后应取 topic 最高的那一块"
+    assert card.candidate_comment == "最后一段评论"
+    quotes = [point.short_quote for point in card.key_points]
+    assert "最后一段的关键结论" in quotes, "最后一段的要点必须进入短卡"
+    totals = db.text_job_totals()
+    assert totals["prompt_tokens"] == 240, "两块 usage 必须相加"
+    assert totals["completion_tokens"] == 80
+
+    # 相同输入再跑一次：必须命中缓存，不能再调模型
+    second = await worker.analyze(**args)
+    assert "TEXT_WORKER_CACHE_HIT" in second.limitations
+    assert second.relevance_score == 90
+    assert second.candidate_comment == "最后一段评论"
+    await worker.aclose()
+
+
+async def test_analyze_partial_chunk_failure_marks_deep_review(
+    db: Database, evidence_setup: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一块失败不能把部分覆盖说成全文；保留成功块并强制深审。"""
+    monkeypatch.setattr("core.text_worker.resolve_secret", lambda _n: "fake-key")
+    db.upsert_video(bvid="BV1partial001", aid=333, title="部分失败")
+    ids = []
+    for index in range(2):
+        ids.append(
+            db.add_evidence(
+                bvid="BV1partial001", source_type="subtitle",
+                text=f"第{index}块真实内容" + "补" * 3000, start_sec=float(index),
+            )
+        )
+    blocks = [
+        {"evidence_id": str(row["evidence_id"]), "source_type": str(row["source_type"]),
+         "start_sec": row["start_sec"], "text": str(row["text"])}
+        for row in db.evidence_for_bvid("BV1partial001")
+    ]
+    ok_reply = {
+        "key_points": [
+            {"claim": "第一块", "evidence_id": ids[0], "short_quote": "第0块真实内容",
+             "start_sec": 0.0}
+        ],
+        "scores": {"topic": 80, "usefulness": 80, "novelty": 80, "evidence": 80},
+        "candidate_comment": "部分结果",
+    }
+    worker = worker_with(
+        db,
+        [model_reply(ok_reply), httpx.Response(500), httpx.Response(500)],
+    )
+    card = await worker.analyze(
+        bvid="BV1partial001", aid=333, title="部分失败", source_url="u",
+        evidence_level="subtitle", evidence_blocks=blocks,
+    )
+    assert card.needs_deep_review is True
+    assert "MODEL_CHUNK_FAILED_1" in card.limitations
+    assert [point.short_quote for point in card.key_points] == ["第0块真实内容"]
+    await worker.aclose()
+
 
 
 # ---------------------------------------------------------------------------
