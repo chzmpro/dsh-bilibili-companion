@@ -281,8 +281,6 @@ class Pipeline:
                 elif asr_note:
                     limitations.append(asr_note)
 
-        self.db.set_video_status(bvid, "read")
-
         card: CandidateCard
         if self.worker is not None:
             card = await self.worker.analyze(
@@ -322,6 +320,8 @@ class Pipeline:
                 else "仅简介可用，不得写成\"视频讲到\""
             )
         )
+        # 预处理完成才标为 read；中途取消时仍应能在下轮继续。
+        self.db.set_video_status(bvid, "read")
         return card, blocks
 
     def build_focus(self) -> dict[str, list[str]]:
@@ -416,7 +416,27 @@ class Pipeline:
     ) -> BatchResult:
         """定时/手动批处理：发现 → 去重 → 限速读取 → 豆包预处理 → 短候选包。"""
         batch = BatchResult()
-        discovery = await self.discover(keywords=keywords, days=days, limit=limit)
+        # 同一个预算覆盖发现、网络等待和模型调用，不只在视频间检查。
+        budget = float(getattr(self.config.text_worker, "max_batch_seconds", 90.0))
+        started_at = time.monotonic()
+
+        def remaining() -> float:
+            return budget - (time.monotonic() - started_at)
+
+        try:
+            async with asyncio.timeout(max(0.0, remaining())):
+                discovery = await self.discover(keywords=keywords, days=days, limit=limit)
+        except TimeoutError:
+            batch.failed.append({
+                "keyword_or_bvid": "discovery", "reason": "DISCOVERY_TIME_BUDGET_EXHAUSTED"
+            })
+            batch.deferred_bvids = self._pending_videos(
+                limit=self.config.discovery.max_full_reads_per_run
+            )
+            batch.elapsed_seconds = time.monotonic() - started_at
+            batch.limitations.append("TIME_BUDGET_EXHAUSTED_DURING_DISCOVERY")
+            batch.cache_stats = self.queue.stats.to_dict()
+            return batch
         batch.failed.extend(
             {"keyword_or_bvid": err, "reason": "discover_error"} for err in discovery.errors
         )
@@ -434,16 +454,9 @@ class Pipeline:
 
         if not pending:
             batch.limitations.append("NO_PENDING_VIDEOS")
+            batch.elapsed_seconds = time.monotonic() - started_at
             batch.cache_stats = self.queue.stats.to_dict()
             return batch
-
-        # ★ 时间预算：必须在 DSH 的 toolCallTimeoutMs 之前主动收尾，
-        #   否则调用会被掐断（实测真实一轮 198s vs 超时 120s）。
-        budget = float(getattr(self.config.text_worker, "max_batch_seconds", 90.0))
-        started_at = time.monotonic()
-
-        def remaining() -> float:
-            return budget - (time.monotonic() - started_at)
 
         cards: list[CandidateCard] = []
         # ★ 确定性规则选出的新近样本，保证弱模型漏掉的好内容仍能被 DSH 抽查
@@ -452,7 +465,12 @@ class Pipeline:
                 batch.deferred_bvids.append(bvid)
                 continue
             try:
-                card, blocks = await self.read_video(bvid)
+                async with asyncio.timeout(max(0.0, remaining())):
+                    card, blocks = await self.read_video(bvid)
+            except TimeoutError:
+                # 已登记的证据留在库内供重试复用；本轮不冒充完整读完。
+                batch.deferred_bvids.append(bvid)
+                continue
             except RequestsBlocked as exc:
                 batch.failed.append({"keyword_or_bvid": bvid, "reason": f"BLOCKED:{exc.state}"})
                 break

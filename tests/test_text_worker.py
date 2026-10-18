@@ -510,7 +510,51 @@ async def test_cache_key_parts_recorded(
     assert row is not None
     assert str(row["model_id"]) == "doubao-test"
     assert str(row["prompt_version"]) == PROMPT_VERSION
-    assert str(row["input_sha256"]) == input_sha256("原文")
+    assert len(str(row["input_sha256"])) == 64
+    assert str(row["input_sha256"]) != input_sha256("原文"), "缓存不能只按证据正文建立"
+
+
+@pytest.mark.parametrize("change", ["none", "title", "keywords", "rules", "likes", "dislikes"])
+async def test_cache_tracks_model_prompt_context(
+    db: Database,
+    evidence_setup: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """相同输入复用缓存；主人关注点或标题改变时必须重新分析。"""
+    monkeypatch.setattr("core.text_worker.resolve_secret", lambda _n: "fake-key")
+    point = {
+        "claim": "插件能自动整理笔记", "evidence_id": evidence_setup["ev1"],
+        "start_sec": 42.0, "short_quote": "自动整理笔记",
+    }
+    worker = worker_with(db, [
+        model_reply({"key_points": [point], "relevance_score": 10}),
+        model_reply({"key_points": [point], "relevance_score": 90}),
+    ])
+    args: dict[str, Any] = {
+        "bvid": "BV1test00001", "aid": 111, "title": "原始标题", "source_url": "u",
+        "evidence_level": "subtitle",
+        "evidence_blocks": [{
+            "evidence_id": evidence_setup["ev1"], "source_type": "subtitle",
+            "start_sec": 42.0, "text": "这个插件可以自动整理笔记",
+        }],
+        "focus": {"keywords": ["原先关注"]},
+    }
+    first = await worker.analyze(**args)
+    assert first.needs_deep_review is False
+    assert first.relevance_score == 10
+    if change == "title":
+        args["title"] = "更新后的标题"
+    elif change != "none":
+        args["focus"] = {**args["focus"], change: ["新的关注规则"]}
+    second = await worker.analyze(**args)
+    if change == "none":
+        assert "TEXT_WORKER_CACHE_HIT" in second.limitations
+        assert second.relevance_score == 10
+    else:
+        assert "TEXT_WORKER_CACHE_HIT" not in second.limitations
+        assert second.relevance_score == 90
+    await worker.aclose()
 
 
 # ---------------------------------------------------------------------------

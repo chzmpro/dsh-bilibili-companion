@@ -36,11 +36,10 @@ from core.storage import Database
 
 #: 提示词/评分契约版本。**改了评分 rubric 或传给模型的输入就必须 bump**。
 #:
-#: ★ 为什么（2026-10-18 踩到）：缓存键是
-#:   `{bvid}|{input_sha256}|{model_id}|{prompt_version}`
-#:   —— 而 `input_sha256` 只算**证据文本**，**不含 focus**。
-#:   于是"加了 focus 重新打分"会命中旧缓存，看起来重算了其实用的是旧结果。
-#: ⇒ v3：`focus`（主人的关注点）进入打分上下文。
+#: 缓存键是 `{bvid}|{input_sha256}|{model_id}|{prompt_version}`。
+#: input_sha256 必须覆盖实际用户提示词（含标题、focus 与证据定位信息）；
+#: 仅 bump 版本不能解决同一版本下主人修改偏好却复用旧评分的问题。
+#: v3：`focus`（主人的关注点）进入打分上下文。
 PROMPT_VERSION = "v3"
 
 #: 打分维度的权重（**总分由代码算，不由模型编**）。
@@ -674,7 +673,9 @@ class TextWorker:
             )
 
         combined = "\n".join(str(b["text"]) for b in evidence_blocks)
-        digest = input_sha256(combined)
+        digest = input_sha256(self._user_prompt(
+            title=title, evidence_blocks=evidence_blocks, focus=focus
+        ))
         model_id = self.worker_cfg.model
         cached = self.db.find_cached_text_job(
             bvid=bvid,
