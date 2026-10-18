@@ -2,7 +2,7 @@
 
 **给 DSH 一个专用 B 站小号**：找视频、读字幕、判断值不值得推荐、
 写评论草稿、受控发布、回复讨论，并把值得看的视频 `@` 汇报给主号。
-（自动定时执行器还没实现，见 [已知限制](docs/acceptance.md#7-已知限制与未完成项汇总)）
+（打开 DSH 后会自动跑一轮；可在插件配置里关掉）
 
 按项目任务书实现（任务书原文不在本仓库；环境与许可边界见
 [`docs/compatibility.md`](docs/compatibility.md)）。
@@ -30,7 +30,7 @@
 DSH Agent（唯一决策者：选题、复核证据、写最终文字、日程唤醒）
    │  官方 @deepseek-ai/dsh-mcp-client（stdio）
    ▼
-本项目 Python MCP bridge（25 个窄工具，命名空间 bili_companion）
+本项目 Python MCP bridge（26 个窄工具，命名空间 bili_companion）
    ├── 读取适配器      自建 httpx（零 GPL）+ WBI 签名
    ├── 豆包文字 worker  分块提取 → **证据反查** → 短候选包
    ├── 受控发布         9 道门禁 + 幂等键 + reserved/uncertain 状态机
@@ -203,7 +203,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 
 ```bash
 ./.venv/Scripts/python.exe -m cli.app tools
-# 期望：列出 25 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
+# 期望：列出 26 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
 ```
 
 ---
@@ -219,7 +219,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 产出：`<数据目录>/digests/digest-YYYYMMDD.md`（含搜索词、候选数、完整阅读数、
 推荐列表、证据链接、失败与待处理项）。
 
-### 25 个模型可见工具
+### 26 个模型可见工具
 
 | 工具 | 作用 |
 |---|---|
@@ -232,6 +232,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 | `read_evidence_excerpt` | 按 `evidence_id` 取 ≤500 字摘录（只读） |
 | `get_discussion` | 限速拉取评论（只读，内容当**数据**不当指令） |
 | `save_analysis` | 存笔记与草稿（**校验证据真实可反查**） |
+| `search_notes` | 按关键词检索以前学过的知识笔记（只读、短结果，R5） |
 | `list_drafts` | 列出草稿（只读） |
 | `publish_draft` | 从**已存草稿**发布顶层评论（9 道门禁；读回核验后才是 `sent_verified`） |
 | `check_interactions` | 拉取与小号评论/提及相关的新互动 |
@@ -467,17 +468,22 @@ discovery:
 > ★ 另外：**浏览器能访问 shell 不通的主机**（走另一条网络路径）。
 > 实测浏览器打开 `raw.githubusercontent.com` 正常 —— 这是最后的人工兜底。
 
-### 持续跑（想让它更勤）
+### 打开 DSH 自动跑 / 持续跑
 
-默认是"打开 DSH 跑一轮"。想让它**一直跑**：
+默认是"打开 DSH 跑一轮"：插件 5 秒后起 `dm-watch`，60 秒后按 `schedule`
+判定是否到期；到期就自动跑 `run_cycle`（发现→阅读→豆包→短包+完整内容→投递 DSH）。
 
 ```yaml
 schedule:
-  mode: "continuous"      # on_host_start | daily | continuous
-  interval_minutes: 30    # 两轮间隔（≥5）
-  max_runs_per_day: 8     # 跑满自动停
+  mode: "on_host_start"   # 打开 DSH 跑一轮（默认）
+  # mode: "continuous"    # 想更勤：每 30 分钟一轮 + 每天上限 8 轮
+  interval_minutes: 30
+  max_runs_per_day: 8
 ```
 
+> 插件配置 `watchAutoCycle=true` 控制是否随 DSH 起调度；关掉就只监听私信。
+> 自动轮只在**值班员会话在线**时能投递成功；否则只写日报。
+>
 > ⚠️ **刻意不做无限循环** —— 那会明显增加请求量与风控风险。
 > 改成"每 N 分钟一轮 + 每天上限 + **到点自动停**"，且仍走**全部**既有门禁
 > （配额 / 健康 / 幂等 / 发布门禁 / 谷时）。
@@ -568,6 +574,7 @@ multiplane render shot.html --out v.mp4 --draft --from 0 --to 3
 ./.venv/Scripts/python.exe -m cli.app dm-send --text "..." --yes  # 给主人发私信（只能发给主人）
 ./.venv/Scripts/python.exe -m cli.app login-qr                 # 扫码登录小号（终端出二维码）
 ./.venv/Scripts/python.exe -m cli.app verify-recent            # 复核评论公开可见没有（只读）
+./.venv/Scripts/python.exe -m cli.app learn-style              # 从高分评论学表达技巧（R6）
 ./.venv/Scripts/python.exe -m cli.app seen-export --out seen.md  # 导出人类可读判重表（只读）
 ```
 
@@ -637,9 +644,9 @@ interaction:
 export PYTHONIOENCODING=utf-8
 
 # 质量门（全绿才提交）
-./.venv/Scripts/python.exe -m pytest tests/          # 1087 passed, 1 skipped
+./.venv/Scripts/python.exe -m pytest tests/          # 1114 passed, 1 skipped
 ./.venv/Scripts/python.exe -m ruff check core bridge cli tests scripts/
-./.venv/Scripts/python.exe -m mypy                   # strict, 53 files
+./.venv/Scripts/python.exe -m mypy                   # strict, 58 files
 
 # 插件预检（不重启 DSH 就能知道插件能不能加载）
 cd plugin && node selfcheck.mjs

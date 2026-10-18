@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -674,6 +674,24 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         ALTER TABLE drafts_v14 RENAME TO drafts;
         CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
         CREATE INDEX IF NOT EXISTS idx_drafts_bvid ON drafts(bvid);
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v15 —— 豆包"先回占位"与 DSH 正式回复分离（R3，2026-10-18）
+    # ------------------------------------------------------------------
+    #
+    # 主人要求：「豆包会先回复我，然后由 DSH 再次给出更好的回答」。
+    #
+    # 旧实现里豆包走 `reply_to()`：写 `dm_replies` + 把 `dm_inbox` 标 answered
+    # ⇒ DSH 的 `dm_reply` 被幂等挡住、`dm_inbox` 也看不到 ⇒ 第二条回复根本发不出去。
+    #
+    # v15 加两列：豆包那条只记 `acked_at`/`ack_text`，**不占** dm_replies 的唯一回复；
+    # DSH 之后仍可正常 `dm_reply`（status 才变 answered）。
+    (
+        15,
+        """
+        ALTER TABLE dm_inbox ADD COLUMN acked_at INTEGER;
+        ALTER TABLE dm_inbox ADD COLUMN ack_text TEXT NOT NULL DEFAULT '';
         """,
     ),
 )

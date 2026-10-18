@@ -44,6 +44,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import load_config  # noqa: E402
+from core.context_pack import build_focus  # noqa: E402
 from core.storage import Database  # noqa: E402
 from core.text_worker import TextWorker  # noqa: E402
 
@@ -57,7 +58,9 @@ MAX_EVIDENCE = 200
 
 def collect(db: Database, bvid: str) -> dict[str, Any]:
     """取一个视频的标题 + 证据 + 旧分数。"""
-    video = db.query_one("SELECT bvid, aid, title, source_url FROM videos WHERE bvid = ?", (bvid,))
+    video = db.query_one(
+        "SELECT bvid, aid, title, up_name, source_url FROM videos WHERE bvid = ?", (bvid,)
+    )
     if video is None:
         return {"bvid": bvid, "error": "视频不在库里"}
 
@@ -87,6 +90,7 @@ def collect(db: Database, bvid: str) -> dict[str, Any]:
         "bvid": bvid,
         "aid": int(video["aid"] or 0),
         "title": str(video["title"]),
+        "up_name": str(video["up_name"] or ""),
         "source_url": str(video["source_url"]),
         "blocks": blocks,
         "old": dict(old) if old is not None else None,
@@ -108,7 +112,9 @@ async def rescore_one(worker: TextWorker, db: Database, bvid: str) -> dict[str, 
         source_url=info["source_url"],
         evidence_level="subtitle" if len(info["blocks"]) > 1 else "description",
         evidence_blocks=info["blocks"],
-        focus=None,  # 下面用 worker 自己的 focus（若有）
+        # ★ 必须传关注点（含 R4 反馈信号），否则模型不知道"对谁有用"
+        focus=build_focus(db, worker.config),
+        up_name=info.get("up_name", ""),
     )
     return {
         "bvid": bvid,

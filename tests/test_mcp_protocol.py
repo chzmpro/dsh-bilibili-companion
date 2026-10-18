@@ -37,10 +37,9 @@ PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 if not PYTHON.exists():  # pragma: no cover - 非 Windows
     PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
 
-#: ★ 25 个工具 = 任务书 §4 的 14 个 + 主人 2026-10-15 要求新增的 3 个
-#: + 2026-10-17 新增的 2 个搜索方式工具（expand_intent / trends_suggest）：
-#: ``like_video`` / ``favorite_video``（任务书漏了点赞收藏）
-#: 与 ``owner_preferences``（跨对话持久的主人偏好）。
+#: ★ 26 个工具 = 任务书 §4 的 14 个 + 主人 2026-10-15 要求新增的 3 个
+#: + 2026-10-17 新增的搜索/私信/源码/联网工具
+#: + 2026-10-18 的 ``search_notes``（R5：检索以前学过的笔记）。
 EXPECTED_TOOLS = {
     # —— 任务书 §4 的 14 个 ——
     "companion_status",
@@ -75,6 +74,8 @@ EXPECTED_TOOLS = {
     "dm_inbox",
     "dm_reply",
     "dm_push",
+    # —— 2026-10-18：检索以前学过的知识笔记（R5）——
+    "search_notes",
 }
 
 #: 人用入口**绝不能**出现在模型可见的工具列表里（任务书 §3）
@@ -126,13 +127,13 @@ def data_dir(isolated_data_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-async def test_server_starts_and_lists_all_25_tools(data_dir: Path) -> None:
+async def test_server_starts_and_lists_all_26_tools(data_dir: Path) -> None:
     """★ 任务书 §7 任务 2 验收：工具能在协议层被枚举出来。"""
     async with mcp_session(data_dir) as session:
         listed = await session.list_tools()
         names = {tool.name for tool in listed.tools}
     assert names == EXPECTED_TOOLS, f"工具集合不符，差异：{names ^ EXPECTED_TOOLS}"
-    assert len(names) == 25
+    assert len(names) == 26
 
 
 async def test_tools_have_descriptions(data_dir: Path) -> None:

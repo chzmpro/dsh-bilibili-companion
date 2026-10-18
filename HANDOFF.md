@@ -8,17 +8,26 @@
 ## 0. 30 秒速览
 
 **项目**：`D:/DeepSeek/projects/dsh-bilibili-companion` —— B 站自主学习小号「干饭不干事的小鲸鱼」
-**形态**：DSH 插件（设置页）+ Python MCP bridge（**25 个工具**）+ 常驻监听进程
+**形态**：DSH 插件（设置页）+ Python MCP bridge（**26 个工具**）+ 常驻监听进程
 **主人**：沐雨林心（`owner_mid=660490601`）；小号（`agent_mid=3747570769725629`）
 
 ```
 视频入库 115 条 · 有证据 98 · 已打分 98 · 有提炼 37 · 合格(≥75) 37
-schema v14 · dm_inbox 待回复 0
+schema v15 · dm_inbox 待回复 0
 ```
 
 > ★ **2026-10-18 已完成 Codex 审查整改**（#2 字幕全量/分块、#3 整包预算、
 > #4 发布读回 + `sent_pending_verify`、#5 写侧健康传播、#6 token 口径）。
-> 生产闭环（#1）仍是**立项未实现**，见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md)。
+>
+> ★★ **同日完成主人需求 R1–R6**：
+> - R1：打开 DSH 自动跑学习轮（dm-watch `--cycle` + `cycle_scheduler`）；
+> - R2：3 短包 + 2500 规则完整内容合成投递，`dm_push` 支持分享卡片参数；
+> - R3：豆包先回**占位**（不占 `dm_replies`），DSH 仍可正式 `dm_reply`；
+> - R4：`feedback` 自动聚合 UP/关键词偏好，直接作用于 topic 分；
+> - R5：新增 `search_notes` 检索以前学过的笔记；
+> - R6：`cli.app learn-style` 从评论学表达技巧（人用触发）。
+>
+> 生产闭环说明见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md)。
 >
 > 📖 **人用操作手册**：[`docs/user-manual.md`](docs/user-manual.md)（安装/日常/审批/排障）。
 
@@ -209,18 +218,32 @@ agent.followup({
 * DSH 返回的 `max_batch_chars` 现在按**完整 JSON** 计算，首卡也受限；
   截断数量在 `truncated` 字段里（`batch_chars` 等于最终序列化长度）。
 
+### 5.12 自动学习轮：投递成功 ≠ 完成（R1）
+
+`run_cycle` 投递后必须**轮询会话 `turn/end`** 才记 `ok`；
+只看到 `delivered: true` 就宣布成功，是本项目踩过两次的假成功。
+超时记 `delivered_unverified`，值班员不在线记 `delivery_failed`，都如实写 `runs.conclusion`。
+另外：投递成功后**提前释放任务锁**，否则手动 `prepare_batch` 会被锁几分钟。
+
+### 5.13 豆包先回占位，不能占 DSH 的回复名额（R3）
+
+旧实现豆包走 `reply_to()` → 写 `dm_replies` + 标 `answered`
+⇒ DSH 的 `dm_reply` 永远"已回复过"、`dm_inbox` 也看不到。
+v15 起豆包走 `ack_to()`：只写 `acked_at`，**不写 dm_replies、不改 status**；
+DSH 之后正常 `dm_reply`（status 才变 answered）。排查时看 `dm_inbox.acked_at`。
+
 ---
 
 ## 6. 未完成的事（按优先级）
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **生产闭环（#1）** | 定时器、DSH 决策回收、主号汇报串成 `run_cycle`。**已立项未实现**，见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md) |
-| 2 | **真实评论读回样本（#4）** | 机制已实现（`sent_pending_verify` + `cli.app verify-pending`），但还没有真实 rpid 跑过 |
-| 3 | **token 真实验收（#6）** | 当前只有架构估算；真实 DSH usage / ≥5 条互动 / 人工证据核对都未采集 |
-| 4 | **评论区 @** | `core/mention.py::try_mention()` 写得很完整，但**生产代码零调用**（只在 tests 里）。主人说"代码做完了只是没开"，需确认开关在哪并接上 |
-| 5 | **免打扰时段** | 参考项目有 `sleep_start/sleep_end`（02:00-08:00），我们没有 |
-| 6 | **人设化推荐语未验证** | `scripts/generate_recommendations.py` 写好了但没跑过（后来改成投递给值班员写，这条可能不需要了） |
+| 1 | **真实评论读回样本（#4）** | 机制已实现（`sent_pending_verify` + `cli.app verify-pending`），但还没有真实 rpid 跑过 |
+| 2 | **token 真实验收（#6）** | 当前只有架构估算；真实 DSH usage / ≥5 条互动 / 人工证据核对都未采集 |
+| 3 | **评论区 @** | `core/mention.py::try_mention()` 写得很完整，但**生产代码零调用**（只在 tests 里）。主人说"代码做完了只是没开"，需确认开关在哪并接上 |
+| 4 | **免打扰时段** | 参考项目有 `sleep_start/sleep_end`（02:00-08:00），我们没有 |
+| 5 | **人设化推荐语未验证** | `scripts/generate_recommendations.py` 写好了但没跑过（后来改成投递给值班员写，这条可能不需要了） |
+| 6 | **自动轮的真实宿主验收** | 代码与替身测试已过；还没在重启后的 DSH 里跑过一轮完整自动闭环 |
 
 ---
 

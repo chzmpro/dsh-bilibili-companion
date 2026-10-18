@@ -435,6 +435,8 @@ class Pipeline:
                 #   不传的话它只能按"内容充实度"打分 —— 这正是
                 #   "没什么用却给 100 分"的根因。
                 focus=self.build_focus(),
+                # R4：UP 名字用于"主人反馈喜欢/不喜欢的 UP"偏置
+                up_name=detail.up_name,
             )
         else:
             card = CandidateCard(
@@ -487,6 +489,10 @@ class Pipeline:
             "rules": [],
             "likes": [],
             "dislikes": [],
+            "liked_ups": [],
+            "disliked_ups": [],
+            "liked_keywords": [],
+            "disliked_keywords": [],
         }
         # ⚠️ 这里用 suppress 而不是 try/except-pass：
         #    打分降级好过整轮失败（读不到偏好就按"只看关键词"打）
@@ -510,6 +516,13 @@ class Pipeline:
                     focus["likes"].append(content)
                 elif kind == "dislike":
                     focus["dislikes"].append(content)
+
+        # ★ R4：把「主人反馈」聚合成 UP / 发现关键词的偏好信号。
+        #   只读本地 feedback + videos，不额外调模型、不写配置。
+        with contextlib.suppress(Exception):
+            signals = self.db.feedback_signals()
+            for key in ("liked_ups", "disliked_ups", "liked_keywords", "disliked_keywords"):
+                focus[key] = list(signals.get(key, []))
 
         return focus
 

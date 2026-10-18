@@ -647,6 +647,9 @@ def dm_watch(
     reply: bool = typer.Option(
         False, "--reply", help="开启**自动回复**（默认只观察，不发送）"
     ),
+    cycle: bool = typer.Option(
+        False, "--cycle", help="随 DSH 自动跑学习轮（到期才跑；见 schedule）"
+    ),
     text: str = typer.Option("", "--text", help="自动回复的固定话术（留空用默认）"),
     autostart: bool = typer.Option(
         True, "--autostart/--no-autostart", help="打开面板就自动开始监听"
@@ -732,6 +735,7 @@ def dm_watch(
         deliver_delay_seconds=deliver_delay,
         db_factory=_make_db,
         queue_factory=_make_queue,
+        auto_cycle=cycle,
     )
 
     try:
@@ -1455,6 +1459,36 @@ def prefs(
     typer.echo("")
     typer.echo("⚠️ 偏好只影响排序与内容策略；发布模式/配额/UID 只能由 config.yaml 决定。")
     db.close()
+
+
+@app.command("learn-style")
+def learn_style_cmd(
+    limit: int = typer.Option(20, "--limit", help="最多分析多少条评论"),
+) -> None:
+    """从**高分视频评论区**学习表达技巧（R6，人用触发）。
+
+    结果写进 `owner_preferences` 的「表达风格（自动学习）」注记，
+    之后豆包的回复上下文会自动带上；**不改 persona.md**。
+    """
+    _configure_stdio()
+    import asyncio
+
+    from core.style import learn_style
+
+    config = _load_config()
+    db = _open_db()
+    try:
+        result = asyncio.run(learn_style(db, config, limit=limit))
+    finally:
+        db.close()
+
+    if not result.ok:
+        typer.secho(f"学习失败：{result.reason}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
+    typer.secho("已更新「表达风格（自动学习）」：", fg=typer.colors.GREEN)
+    for point in result.points or []:
+        typer.echo(f"  · {point}")
+    typer.echo(f"（pref_id={result.pref_id}；上一版已停用，保留可追溯）")
 
 
 @app.command("mention-status")

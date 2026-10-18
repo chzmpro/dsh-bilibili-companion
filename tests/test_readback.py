@@ -225,7 +225,7 @@ def test_schema_v14_upgrade_preserves_rows(tmp_path: Any) -> None:
     conn.close()
 
     db = Database(path)
-    assert db.migrate() == 14
+    assert db.migrate() == 15
     db.upsert_video(bvid="BV1mig000001", aid=1, title="迁移测试")
     db.execute(
         "INSERT INTO actions (action_id, agent_mid, action_type, bvid, idempotency_key,"

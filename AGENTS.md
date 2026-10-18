@@ -45,7 +45,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 
 ---
 
-## 2. 你只能通过这 25 个 MCP 工具干活
+## 2. 你只能通过这 26 个 MCP 工具干活
 
 `mcp__bili_companion__*`：
 
@@ -58,7 +58,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 | **私信** | `dm_inbox`（取待回复）`dm_reply`（回复某条）`dm_push`（**主动私信**） |
 | **读外部** | `find_repo`（从视频找仓库）`read_source`（读 GitHub/Gitee 源码）`web_search`（免费联网） |
 | 讨论 | `get_discussion` `check_interactions` |
-| 笔记/草稿 | `save_analysis` `list_drafts` `prepare_reply` |
+| 笔记/草稿 | `save_analysis` `search_notes` `list_drafts` `prepare_reply` |
 | 发布 | `publish_draft` `publish_reply` `like_video` `favorite_video` |
 | 其他 | `feedback` `pause` `owner_preferences` |
 
@@ -148,7 +148,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 | 怎么装、怎么用、出问题怎么办 | [`README.md`](README.md) |
 | **人用操作手册（先看这个）** | [`docs/user-manual.md`](docs/user-manual.md) |
 | 已验收 / 未验收清单 | [`docs/acceptance.md`](docs/acceptance.md) |
-| **生产闭环（#1）立项** | [`docs/production-loop-plan.md`](docs/production-loop-plan.md) |
+| **生产闭环（R1）说明** | [`docs/production-loop-plan.md`](docs/production-loop-plan.md) |
 | 换对话/记忆/自动唤醒 | [`docs/dedicated-conversation.md`](docs/dedicated-conversation.md) |
 | 定时怎么接 | [`docs/schedule-wiring.md`](docs/schedule-wiring.md) |
 | 环境与许可边界 | [`docs/compatibility.md`](docs/compatibility.md) |
@@ -170,7 +170,7 @@ cd D:/DeepSeek/projects/dsh-bilibili-companion
 ./.venv/Scripts/python.exe -m cli.app schedule        # 该不该跑
 ./.venv/Scripts/python.exe -m cli.app audit-persona   # 人设/红线审计
 ./.venv/Scripts/python.exe -m cli.app mention-status  # @ 主号投递记录
-./.venv/Scripts/python.exe -m cli.app tools           # 25 个 MCP 工具
+./.venv/Scripts/python.exe -m cli.app tools           # 26 个 MCP 工具
 ./.venv/Scripts/python.exe -m cli.app dm-read         # 读与主人的私信（只读）
 ./.venv/Scripts/python.exe -m cli.app dm-ingest       # 私信里的分享视频 → 走同一套短包管道
 ./.venv/Scripts/python.exe -m cli.app keywords        # 审候选关键词池（推荐流来的）

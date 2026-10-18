@@ -4,7 +4,7 @@
 > 模型的行为约束（不是给人看的）见 [`AGENTS.md`](../AGENTS.md)；
 > 技术细节与验收证据见 [`README.md`](../README.md) 与 [`docs/acceptance.md`](acceptance.md)。
 >
-> 版本：2026-10-18 · 适用 schema v14 · MCP 工具 25 个
+> 版本：2026-10-18 · 适用 schema v15 · MCP 工具 26 个
 
 ---
 
@@ -33,6 +33,7 @@
 
 | 我想… | 怎么做 |
 |---|---|
+| **打开 DSH 就自动跑** | 默认就会（插件 5 秒后起 dm-watch，60 秒后检查是否该跑；见 §8.0） |
 | 看今天该不该跑 | 对 DSH 说“调 `companion_status` 看今天该不该跑”，或跑 `cli.app status` / `cli.app schedule` |
 | 手动跑一轮 | 对 DSH 说“`prepare_batch` 跑一轮，给我最多 3 个短包” |
 | 看今天推荐了什么 | `<数据目录>/digests/digest-YYYYMMDD.md` |
@@ -68,7 +69,8 @@
 - 不轮换 IP/账号、不伪造客户端、不代解验证码、不绕过风控；
 - 不把豆包的草稿直接当结论发出去；
 - 不允许模型自己批准草稿 / 恢复停机（那些人用入口不在 MCP 工具里）；
-- 当前**不会自己定时跑学习闭环**（`schedule` 只做“该不该跑”的判定，执行器还没实现，见 [已知限制](#15-已知限制)）。
+- ✅ **打开 DSH 会自动跑一轮**（插件起 dm-watch，后者按 `schedule` 判定是否到期）；
+- 但**公开写入（评论/点赞/收藏）仍默认关闭**，推荐只走私信。
 
 ---
 
@@ -194,7 +196,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 
 ```bash
 ./.venv/Scripts/python.exe -m cli.app tools
-# 期望：25 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
+# 期望：26 个工具 + "✅ 人用入口未出现在 MCP 工具列表里"
 ```
 
 ---
@@ -204,7 +206,7 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 装完后逐条打勾（全绿才算装好）：
 
 - [ ] `cli.app status` 能显示数据目录 / 健康 / 配额，且 `text_worker_key_source` 不是 missing
-- [ ] `cli.app tools` 列出 25 个工具，且没有 `approve` / `resume` / `import-cookie`
+- [ ] `cli.app tools` 列出 26 个工具，且没有 `approve` / `resume` / `import-cookie`
 - [ ] DSH 里 `companion_status` 能返回 `mode=observe` / `dry_run=true` / `publish_enabled=false`
 - [ ] `cli.app schedule` 能说出“该不该跑 / 下一次”
 - [ ] `scripts/run_once.py --keywords "..."` 能产出一份日报
@@ -236,12 +238,33 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 4) 我挑中的，用 read_video 或 read_evidence_excerpt 核实后 save_analysis
 ```
 
-> 模型看不到原文全文；它只能用 `evidence_id` 取 ≤500 字摘录。
-> 这是**设计**（省 token、防编造），不是它偷懒。
+> MCP 工具（别的会话）看不到原文全文；**自动调度**会把
+> 「3 个短包 + 2500 规则整理后的完整内容」投递给**值班员会话**，
+> 那个会话里的 DSH 才能看到完整内容。这是两条不同的通道。
 
 ---
 
 ## 8. 日常操作
+
+### 8.0 打开 DSH 后自动跑（R1）
+
+默认行为（插件配置 `watchAutoCycle=true`）：
+
+```
+DSH 启动
+  → 5 秒后插件起 dm-watch（私信监听 + 学习轮调度）
+  → 60 秒后检查 schedule：到期就自动跑一轮
+  → 发现/阅读/豆包打分 → 补评论 → 短包+完整内容投给值班员会话
+  → DSH 写推荐，用 dm_push 发 1~3 条私信
+  → 轮询会话 turn/end，跑完才记 ok；超时记 delivered_unverified
+```
+
+要点：
+
+- **不是开机自启**：DSH 退出，dm-watch 一起停；
+- 先满足 `schedule`：暂停 / 平台阻断 / 未结束的上一轮 / 未到期 → **不跑**；
+- 值班员会话不在线 → 只写日报，不发私信；
+- 想关掉：插件配置 `watchAutoCycle=false`（或在设置页关；需重启 dm-watch）。
 
 ### 8.1 看状态
 
@@ -251,15 +274,17 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 | 健康状态 / 配额 / 凭据诊断 | `cli.app status` |
 | @ 主号投递状态 | `cli.app mention-status` |
 | 监听进程活着没 | 打开 http://127.0.0.1:8848/ 或看 `$DSH_HOME/bili-companion/watch.log` |
+| 自动学习轮状态 | 看 `runs` 表最近一轮的 `conclusion`（`ok`/`delivered_unverified`/`delivery_failed`…） |
 
 ### 8.2 跑一轮
 
-- DSH：`prepare_batch`；
+- **自动**：打开 DSH 后按 `schedule` 自己跑（§8.0）；
+- DSH：`prepare_batch`（手动再跑一轮）；
 - 命令行：`scripts/run_once.py --keywords "..."`；
 - 插件设置页：「现在跑一轮」。
 
-> **`continuous` 现在只是判定，不会自己跑**。要“自己跑”，见
-> [`docs/schedule-wiring.md`](schedule-wiring.md)，或等 #1 生产闭环实现。
+> `continuous` 模式是“每 30 分钟一轮 + 每天上限 8 轮”；
+> 想“打开就跑一次”，把 `schedule.mode` 改成 `on_host_start`。
 
 ### 8.3 看日报
 
@@ -277,6 +302,8 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 
 > 监听进程的自动回复开关是 `dm-watch --reply` / 插件配置 `watchAutoReply`，
 > 与视频评论的 `publish_enabled` **互相独立**。
+> 豆包那条只是**先回占位**（不占 DSH 的正式回复），DSH 之后仍可用
+> `dm_reply` 给正式回答；`dm_inbox` 里 `acked=true` 就表示豆包已先回过。
 
 ### 8.5 调整关键词 / 偏好
 
@@ -284,7 +311,26 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 - 推荐流候选词：`cli.app keywords` 审阅后 `--accept`（**模型不能自己改关注词**）；
 - 偏好（只影响排序）：让 DSH 调 `owner_preferences`，或 `cli.app prefs`。
 
-### 8.6 暂停 / 恢复
+### 8.6 兴趣学习与表达学习
+
+**兴趣学习（R4，自动）**：
+
+- DSH 在主人表达喜欢/不喜欢时调 `feedback(bvid, verdict)`；
+- 系统按“净反馈”自动聚合成 `liked_ups / disliked_ups / liked_keywords /
+  disliked_keywords`，进入打分 `focus`；
+- 喜欢的 UP/关键词 → topic 至少 80；不喜欢的 → topic 最多 35；
+- 想看聚合结果：`cli.app prefs`（偏好）或 `db.feedback_signals()`。
+
+**表达学习（R6，人用触发）**：
+
+```bash
+./.venv/Scripts/python.exe -m cli.app learn-style
+```
+
+从**高分视频评论区**提炼 3~5 条表达技巧，写进 `owner_preferences`
+的「表达风格（自动学习）」注记；之后豆包回复会自动带上。**不改 persona.md**。
+
+### 8.7 暂停 / 恢复
 
 | 动作 | 谁做 | 命令 |
 |---|---|---|
@@ -292,11 +338,12 @@ node "$DSH_HOME/tools/check-plugin-form.mjs" --dump dump.txt
 | 恢复 | **只能人** | `cli.app resume --reason "..."` |
 | 风控/验证码后恢复 | **只能人** | 先在官方 App 完成验证，再 `resume` |
 
-### 8.7 监听面板
+### 8.8 监听面板
 
 ```bash
 ./.venv/Scripts/python.exe -m cli.app dm-watch            # 只记录，不发送
-./.venv/Scripts/python.exe -m cli.app dm-watch --reply    # 自动回复主人私信
+./.venv/Scripts/python.exe -m cli.app dm-watch --reply    # 豆包先回占位
+./.venv/Scripts/python.exe -m cli.app dm-watch --cycle    # 随 DSH 自动跑学习轮
 ```
 
 面板：http://127.0.0.1:8848/（状态 / 开始停止 / 事件流）。
@@ -406,6 +453,11 @@ DSH 调 `like_video` / `favorite_video`，与评论同一套门禁。
 | `-412` / `blocked` | 疑似风控 → 停机调查，**不要**加大重试；`resume` 前先确认原因 |
 | `DRY_RUN` / `MODE_OBSERVE` 拒绝发布 | 正常，真实发布要人改三重开关 |
 | `TARGET_FROZEN_UNCERTAIN` | 有结果未知的动作 → 到官方页面人工核对，不会自动重发 |
+| 自动轮没跑 | 依次查：暂停？平台阻断？上一轮未结束？未到期？值班员会话不在线？看 `runs` 最近一条 conclusion |
+| `conclusion=delivery_failed` | 值班员会话没配/没激活 → 在 DSH 里打开该会话并选一次模型 |
+| `conclusion=delivered_unverified` | 已投递但没等到 turn/end 完成 → 看会话是否报错，或调大 `DEFAULT_WAIT_SECONDS` |
+| `conclusion=no_candidates` | 本轮没有新的候选（可能都读过/分数不够），不是故障 |
+| 豆包先回占位后 DSH 回不了 | 老版本会这样；v15 起占位不占 `dm_replies`，DSH 仍可 `dm_reply` |
 | 返回 `OK_PENDING_VERIFY` | **正常**：已发出、待读回。等一会儿 `cli.app verify-pending` |
 | `MODEL_INPUT_CHUNKS_n` | 这条视频的证据被分成 n 块送豆包（长视频）——这是正常限制标记 |
 | `MODEL_CHUNK_FAILED_n` | 有 n 块模型调用失败；候选会标深审，不会把部分覆盖当全文 |
@@ -450,7 +502,7 @@ tar -czf "backup-$(date +%Y%m%d).tgz" "$DATA/companion.db" \
 与 `config.yaml` → 启动（schema 会自动迁移）。
 
 **schema 迁移**：每次升级自动执行，只能追加、不会改历史版本。
-2026-10-18 已到 **v14**（发布读回核验）。升级前**先备份**。
+2026-10-18 已到 **v15**（发布读回 + 豆包占位与 DSH 正式回复分离）。升级前**先备份**。
 
 ---
 
@@ -481,14 +533,16 @@ git pull origin main
 
 | # | 限制 | 影响 |
 |---|---|---|
-| 1 | **生产闭环未实现（#1）** | `continuous` 只是配置与判定，没有执行器；要“自己跑”需按 `schedule-wiring.md` 接 DSH 日程 |
+| 1 | **自动轮已实现，但依赖值班员会话在线** | 会话不在线时只写日报、不发私信；自动轮不会替你打开 DSH 会话 |
 | 2 | **token 只有架构估算（#6）** | 83.7% 是估算，不是真实 DSH usage；真实费用未验收 |
 | 3 | **真实评论读回无样本（#4）** | 机制已实现并测试，但还没有真实 rpid 跑过 |
 | 4 | **`@` 投递通道未接** | `mention-status` 默认 `unsupported`，不假称已通知 |
-| 5 | **多平台只预留框架** | 抖音 / 小红书未接入 |
-| 6 | **ASR 依赖重（约 1 GB）** | 默认关；缺依赖只降级，不崩 |
-| 7 | **只在 Windows 实测** | 浏览器探测/注册表/creationflags 都是 Windows 假设 |
-| 8 | **无 CI** | 质量门目前靠本机命令，不靠 GitHub Actions |
+| 5 | **兴趣学习是规则聚合，不是大模型总结（R4）** | 只看“UP / 发现关键词”的净反馈；更细的兴趣归纳还没做 |
+| 6 | **表达学习是人用触发（R6）** | `cli.app learn-style` 才会更新；不会每轮自动改人设 |
+| 7 | **多平台只预留框架** | 抖音 / 小红书未接入 |
+| 8 | **ASR 依赖重（约 1 GB）** | 默认关；缺依赖只降级，不崩 |
+| 9 | **只在 Windows 实测** | 浏览器探测/注册表/creationflags 都是 Windows 假设 |
+| 10 | **无 CI** | 质量门目前靠本机命令，不靠 GitHub Actions |
 
 ---
 
@@ -510,19 +564,20 @@ git pull origin main
 ./.venv/Scripts/python.exe -m cli.app digest            # 生成日报
 ./.venv/Scripts/python.exe -m cli.app keywords          # 候选关键词池
 ./.venv/Scripts/python.exe -m cli.app prefs             # 主人偏好
+./.venv/Scripts/python.exe -m cli.app learn-style       # 从评论学表达技巧（R6）
 ./.venv/Scripts/python.exe -m cli.app dm-read
 ./.venv/Scripts/python.exe -m cli.app dm-send --text "…" --yes
 ./.venv/Scripts/python.exe -m cli.app mention-status
 ./.venv/Scripts/python.exe -m cli.app audit-persona
-./.venv/Scripts/python.exe -m cli.app tools             # 25 个模型工具（对照）
+./.venv/Scripts/python.exe -m cli.app tools             # 26 个模型工具（对照）
 ```
 
-### 模型工具（25 个，只通过 DSH 调）
+### 模型工具（26 个，只通过 DSH 调）
 
 `companion_status` `expand_intent` `trends_suggest` `discover_videos` `prepare_batch`
-`read_video` `read_evidence_excerpt` `get_discussion` `save_analysis` `list_drafts`
-`publish_draft` `check_interactions` `prepare_reply` `publish_reply` `dm_inbox`
-`dm_reply` `dm_push` `find_repo` `read_source` `web_search` `like_video`
+`read_video` `read_evidence_excerpt` `get_discussion` `save_analysis` `search_notes`
+`list_drafts` `publish_draft` `check_interactions` `prepare_reply` `publish_reply`
+`dm_inbox` `dm_reply` `dm_push` `find_repo` `read_source` `web_search` `like_video`
 `favorite_video` `owner_preferences` `feedback` `pause`
 
 ### 文档地图
@@ -532,7 +587,7 @@ git pull origin main
 | 装/配置/技术细节 | [`README.md`](../README.md) |
 | 接手：现在在哪、下一步 | [`HANDOFF.md`](../HANDOFF.md) |
 | 已验收 / 未验收 | [`docs/acceptance.md`](acceptance.md) |
-| 生产闭环（#1）立项 | [`docs/production-loop-plan.md`](production-loop-plan.md) |
+| 生产闭环（R1）说明 | [`docs/production-loop-plan.md`](production-loop-plan.md) |
 | 设置页与持续跑 | [`docs/continuous-and-settings.md`](continuous-and-settings.md) |
 | 定时接线 | [`docs/schedule-wiring.md`](schedule-wiring.md) |
 | 人设与红线 | [`docs/persona.md`](persona.md) |

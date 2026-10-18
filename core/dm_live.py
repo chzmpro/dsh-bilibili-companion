@@ -239,3 +239,39 @@ async def reply_to(
         )
 
     return True, f"已回复（msg_key={getattr(result, 'msg_key', '')}）"
+
+
+async def ack_to(
+    *,
+    db: Database,
+    config: Any,
+    cookies: Any,
+    msg_seqno: int,
+    text: str,
+) -> tuple[bool, str]:
+    """豆包**先回一条占位**：只发消息，不占 DSH 的正式回复名额（R3）。
+
+    与 :func:`reply_to` 的差别（这是主人 2026-10-18 的明确要求）：
+
+    * **不写** ``dm_replies`` ⇒ 同一条私信之后仍可由 DSH 用 ``dm_reply``
+      给出正式回答；
+    * **不改** ``dm_inbox.status``（仍是 pending）⇒ DSH 的 ``dm_inbox``
+      还能看到、还能回复；
+    * 只写 ``dm_inbox.acked_at`` / ``ack_text`` ⇒ 防止监听进程重复回同一条。
+
+    Returns:
+        ``(成功, 说明)``。发送失败**不**写 acked_at，下一轮还能再试。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False, "占位回复正文为空"
+    if len(body) > MAX_DM_CHARS:
+        return False, f"正文 {len(body)} 字，超过上限 {MAX_DM_CHARS}"
+
+    result = await send_to_owner(config=config, cookies=cookies, text=body, db=db)
+    with contextlib.suppress(Exception):
+        db.execute(
+            "UPDATE dm_inbox SET acked_at = ?, ack_text = ? WHERE msg_seqno = ?",
+            (int(time.time()), body[:MAX_DM_CHARS], int(msg_seqno)),
+        )
+    return True, f"已先回占位（msg_key={getattr(result, 'msg_key', '')}）"

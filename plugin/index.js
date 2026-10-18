@@ -59,6 +59,8 @@ const CONFIG_DEFAULTS = Object.freeze({
   watchPort: 8848,
   watchInterval: 60,
   watchAutoReply: false,
+  // ★ 随 DSH 自动跑学习轮（R1；与私信监听同一个常驻进程）
+  watchAutoCycle: true,
   // ★ 值班员会话 id（用户手动开的那个会话；投递只允许投给它）
   watchSessionId: '',
   // ★ 监听是否随 DSH 自动启动（不是开机自启，DSH 退出会一起停）
@@ -106,6 +108,8 @@ function normalizeConfig(src, base) {
     out.watchInterval = watchInterval
   }
   if (typeof src.watchAutoReply === 'boolean') out.watchAutoReply = src.watchAutoReply
+  // 随 DSH 自动跑学习轮（默认 true；设 false 就只监听私信、不自动找视频）
+  if (typeof src.watchAutoCycle === 'boolean') out.watchAutoCycle = src.watchAutoCycle
   // 值班员会话 id（投递目标，白名单）
   if (typeof src.watchSessionId === 'string') out.watchSessionId = src.watchSessionId.trim()
   // 监听是否随 DSH 自动启动（默认 true；设 false 就退回手动点按钮）
@@ -390,6 +394,8 @@ function applyInner(ctx, config) {
     const args = ['-m', 'cli.app', 'dm-watch', '--port', String(port)]
     if (cfg.watchInterval) args.push('--interval', String(cfg.watchInterval))
     if (cfg.watchAutoReply) args.push('--reply')
+    // R1：自动学习轮与私信监听共用这个常驻进程（默认开）
+    if (cfg.watchAutoCycle !== false) args.push('--cycle')
 
     const logFile = join(home, 'watch.log')
     let fd

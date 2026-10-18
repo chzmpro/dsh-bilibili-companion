@@ -18,8 +18,8 @@
 
 | 验收维度 | 状态 |
 |---|---|
-| 代码 + 自动化测试（**1087 项**，2026-10-18） | ✅ **通过** |
-| 静态检查（ruff + mypy strict，53 源文件） | ✅ **通过** |
+| 代码 + 自动化测试（**1114 项**，2026-10-18） | ✅ **通过** |
+| 静态检查（ruff + mypy strict，58 源文件） | ✅ **通过** |
 | MCP 服务端（真实 stdio 协议，25 工具） | ✅ **通过** |
 | 只读闭环（发现→证据→短包→日报） | ✅ **通过（mock 平台）** |
 | 模拟发布（dry_run，真实写入 = 0） | ✅ **通过** |
@@ -190,7 +190,7 @@ cd D:/DeepSeek/projects/dsh-bilibili-companion
 | 行归属 | ✅ `dsh-bili-companion` **恰好 1 行**（多行会重复挂载 → 安全模式） |
 | 设置页 | ✅ 主人确认「设置 → B站小号」可见，且不再卡「读设置中」 |
 | 接口 | ✅ `/api/bili-companion/{status,config,report,run}` 全部 HTTP 200 |
-| MCP 工具 | ✅ `mcp__bili_companion__companion_status` 正常（25 个工具） |
+| MCP 工具 | ✅ `mcp__bili_companion__companion_status` 正常（26 个工具） |
 | 「现在跑一轮」 | ✅ 真起子进程，写出日报（`run_62550a909bff44f4`） |
 | 安全模式 | ✅ 修复后**零复发** |
 
@@ -522,7 +522,7 @@ xiaohongshu   未接入   （official_api）
 
 ### 4.1 MCP 协议实测证据（历史快照：2026-10-15，当时 14 个工具）
 
-> 现为 **25 个工具**，最新清单见 [`README.md`](../README.md) 的“25 个模型可见工具”。
+> 现为 **26 个工具**，最新清单见 [`README.md`](../README.md) 的“26 个模型可见工具”。
 
 ```bash
 $ ./.venv/Scripts/python.exe -m cli.app tools
@@ -618,10 +618,24 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 | #4 | 仅取得 rpid 就标 `sent_verified` | ✅ 已修（机制） | `sent_pending_verify` + 作者/正文/BV/root 读回；`tests/test_readback.py` |
 | #5 | 写请求 `-412` 不更新全局健康 | ✅ 已修 | `WriteError.http_status` + `health.classify`；`tests/test_write_health.py` |
 | #6 | 合成字符估算被当成真实验收 | ✅ 口径已改 | 报告标注 `measurement=estimated` / `evidence_reviewed=false`；**仍未做真实验收** |
-| #1 | continuous 调度 / DSH 决策 / 主号汇报未闭环 | 📋 **立项，未实现** | [`docs/production-loop-plan.md`](production-loop-plan.md) |
+| #1 | continuous 调度 / DSH 决策 / 主号汇报未闭环 | ✅ **R1 已实现** | [`docs/production-loop-plan.md`](production-loop-plan.md) |
 
 **仍然未验收**：真实评论读回样本（#4 的机制没有真实 rpid 跑过）、
-真实 DSH usage / ≥5 条互动 / 人工证据核对（#6）、生产闭环（#1）。
+真实 DSH usage / ≥5 条互动 / 人工证据核对（#6）、
+自动轮在真实 DSH 重启后的完整闭环（R1 只有替身/单测）。
+
+---
+
+## 6.6 2026-10-18 主人需求 R1–R6（实现记录）
+
+| 需求 | 实现 | 证据 |
+|---|---|---|
+| **R1 打开 DSH 自动跑** | 插件 5 秒起 dm-watch，60 秒后 `CycleScheduler` 按 `schedule` 判定；到期跑 `run_cycle`，投递后轮询 `turn/end` | `core/cycle.py` / `core/cycle_scheduler.py` / `core/session_status.py`；`tests/test_cycle.py` |
+| **R2 短包 + 完整内容 + 私信** | `core/cycle_content.py` 合成「3 短包 + 2500 规则内容」；`dm_push` 支持 `share_bvid`（web 不支持卡片时自动降级文本） | `render_delivery`；`test_cycle_delivers_short_cards_and_full_content` |
+| **R3 豆包先回 + DSH 正式回** | 豆包改走 `ack_to`（只写 `acked_at`，不占 `dm_replies`）；schema v15；DSH 仍可 `dm_reply` | `tests/test_dm_live.py::test_ack_does_not_block_dsh_formal_reply` |
+| **R4 兴趣学习** | `feedback_signals` 聚合 UP/关键词；`build_focus` 注入；topic 下限 80 / 上限 35 | `core/storage.py`、`core/text_worker.py`；`tests/test_interest.py` |
+| **R5 内容学习** | 新增 `search_notes`（只读、短结果） | `tests/test_notes_search.py`、`tests/test_mcp_protocol.py`（26 工具） |
+| **R6 表达学习** | `cli.app learn-style` 从高分评论提炼表达技巧，写「表达风格（自动学习）」注记 | `core/style.py`；`tests/test_style.py` |
 
 ---
 

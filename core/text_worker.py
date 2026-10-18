@@ -129,11 +129,66 @@ def _apply_keyword_floor(
     if not focus:
         return scores
     keywords = [str(k) for k in (focus.get("keywords") or [])]
+    # R4：主人反馈里"喜欢"的关键词也参与硬下限（本地数据，不额外调用）
+    keywords += [str(k) for k in (focus.get("liked_keywords") or [])]
     floor = _keyword_topic_floor(title, text, keywords)
     if floor <= 0:
         return scores
     updated = dict(scores)
     updated["topic"] = max(int(updated.get("topic", 0)), floor)
+    return updated
+
+
+#: 主人明确反馈"不喜欢"的 UP / 关键词，topic 最多给这么多分。
+FEEDBACK_DISLIKE_CAP = 35
+
+
+def _apply_feedback_bias(
+    scores: dict[str, int],
+    *,
+    up_name: str,
+    title: str,
+    text: str,
+    focus: dict[str, Any] | None,
+) -> dict[str, int]:
+    """用**主人反馈**微调 topic（R4，2026-10-18）。
+
+    * 喜欢的 UP → topic 至少 :data:`KEYWORD_HIT_FLOOR`；
+    * 不喜欢的 UP → topic 最多 :data:`FEEDBACK_DISLIKE_CAP`；
+    * 喜欢过的"发现关键词"命中标题/证据 → 同样抬下限；
+    * 不喜欢的关键词命中 → 同样封顶。
+
+    只改 topic 一项，总分仍由 :func:`_score_from_dimensions` 统一算；
+    数据不足（没有反馈）时原样返回。
+    """
+    if not focus:
+        return scores
+    updated = dict(scores)
+    liked_ups = {str(x).strip() for x in (focus.get("liked_ups") or []) if str(x).strip()}
+    disliked_ups = {
+        str(x).strip() for x in (focus.get("disliked_ups") or []) if str(x).strip()
+    }
+    name = (up_name or "").strip()
+    if name and name in liked_ups:
+        updated["topic"] = max(int(updated.get("topic", 0)), KEYWORD_HIT_FLOOR)
+    if name and name in disliked_ups:
+        updated["topic"] = min(int(updated.get("topic", 100)), FEEDBACK_DISLIKE_CAP)
+
+    haystack = f"{title}\n{text}".casefold()
+    liked_keywords = [
+        str(x).casefold()
+        for x in (focus.get("liked_keywords") or [])
+        if str(x).strip()
+    ]
+    disliked_keywords = [
+        str(x).casefold()
+        for x in (focus.get("disliked_keywords") or [])
+        if str(x).strip()
+    ]
+    if any(item in haystack for item in liked_keywords):
+        updated["topic"] = max(int(updated.get("topic", 0)), KEYWORD_HIT_FLOOR)
+    if any(item in haystack for item in disliked_keywords):
+        updated["topic"] = min(int(updated.get("topic", 100)), FEEDBACK_DISLIKE_CAP)
     return updated
 
 
@@ -707,7 +762,11 @@ class TextWorker:
             rules = [str(r) for r in (focus.get("rules") or []) if str(r).strip()]
             likes = [str(x) for x in (focus.get("likes") or []) if str(x).strip()]
             dislikes = [str(x) for x in (focus.get("dislikes") or []) if str(x).strip()]
-            if keywords or rules or likes or dislikes:
+            liked_ups = [str(x) for x in (focus.get("liked_ups") or []) if str(x).strip()]
+            disliked_ups = [
+                str(x) for x in (focus.get("disliked_ups") or []) if str(x).strip()
+            ]
+            if keywords or rules or likes or dislikes or liked_ups or disliked_ups:
                 lines.append("## 主人关心什么（打 topic 分**只看这个**）")
                 if keywords:
                     lines.append(f"关注关键词：{'、'.join(keywords)}")
@@ -718,6 +777,10 @@ class TextWorker:
                     lines.append(f"明确喜欢的类型：{'、'.join(likes)}")
                 if dislikes:
                     lines.append(f"明确不喜欢的类型：{'、'.join(dislikes)}")
+                if liked_ups:
+                    lines.append(f"主人反馈喜欢的 UP：{'、'.join(liked_ups)}")
+                if disliked_ups:
+                    lines.append(f"主人反馈不喜欢的 UP：{'、'.join(disliked_ups)}")
                 lines.append("")
 
         lines.append(f"视频标题：{title}")
@@ -752,13 +815,16 @@ class TextWorker:
         evidence_level: str,
         evidence_blocks: list[dict[str, Any]],
         focus: dict[str, Any] | None = None,
+        up_name: str = "",
     ) -> CandidateCard:
         """对一批**已登记**的证据做提取，返回**经过反查**的短候选包。
 
         Args:
-            focus: **主人的关注点**（``keywords`` / ``rules`` / ``likes`` / ``dislikes``）。
+            focus: **主人的关注点**（``keywords`` / ``rules`` / ``likes`` / ``dislikes``，
+                以及 R4 的 ``liked_ups`` / ``disliked_ups`` 等反馈信号）。
                 2026-10-17 新增 —— 不传的话模型只能按"内容充实度"打分，
                 会出现"与关注点无关却给 100 分"（主人反馈的真实问题）。
+            up_name: UP 主名字（R4 用于"喜欢/不喜欢的 UP"偏置；不传也能工作）。
         """
         limitations: list[str] = []
 
@@ -829,6 +895,7 @@ class TextWorker:
                     limitations=limitations,
                     focus=focus,
                     evidence_text=combined,
+                    up_name=up_name,
                 )
 
         if len(model_chunks) > 1:
@@ -882,6 +949,7 @@ class TextWorker:
             limitations=limitations,
             focus=focus,
             evidence_text=combined,
+            up_name=up_name,
         )
 
         self.db.record_text_job(
@@ -911,6 +979,7 @@ class TextWorker:
         limitations: list[str],
         focus: dict[str, Any] | None = None,
         evidence_text: str = "",
+        up_name: str = "",
     ) -> CandidateCard:
         """把模型输出变成**经过反查**的短候选包。缓存与实时路径共用。
 
@@ -960,6 +1029,14 @@ class TextWorker:
         if dimensions:
             dimensions = _apply_keyword_floor(
                 dimensions, title=title, text=evidence_text, focus=focus
+            )
+            # R4：主人反馈（喜欢/不喜欢的 UP、发现关键词）直接作用在 topic 上
+            dimensions = _apply_feedback_bias(
+                dimensions,
+                up_name=up_name,
+                title=title,
+                text=evidence_text,
+                focus=focus,
             )
 
         score = _score_from_dimensions(

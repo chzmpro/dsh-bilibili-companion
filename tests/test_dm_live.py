@@ -279,6 +279,44 @@ async def test_reply_to_is_idempotent(db: Database) -> None:
     assert "已回复过" in message
 
 
+async def test_ack_does_not_block_dsh_formal_reply(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ R3：豆包先回占位**不占** dm_replies，DSH 仍能正式回复。"""
+    from types import SimpleNamespace
+
+    from core import dm_live
+
+    async def fake_send(**kwargs: Any) -> Any:
+        return SimpleNamespace(msg_key="remote-1")
+
+    monkeypatch.setattr(dm_live, "send_to_owner", fake_send)
+    db.execute(
+        "INSERT INTO dm_inbox (msg_seqno, text, received_at, status, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (901, "主人：这个视频怎么样", 1_700_000_000, "pending", 1_700_000_000),
+    )
+
+    ok, _message = await dm_live.ack_to(
+        db=db, config=_FakeConfig(), cookies={}, msg_seqno=901, text="收到～我先看看"
+    )
+    assert ok is True
+    row = db.query_one("SELECT status, acked_at, ack_text FROM dm_inbox WHERE msg_seqno = 901")
+    assert row is not None
+    assert row["status"] == "pending", "占位回复不能把消息标成 answered"
+    assert row["acked_at"] is not None
+    assert "先看看" in str(row["ack_text"])
+    assert replied_seqnos(db) == set(), "占位回复不能写 dm_replies"
+
+    # DSH 之后仍然可以正式回复
+    ok2, message2 = await dm_live.reply_to(
+        db=db, config=_FakeConfig(), cookies={}, msg_seqno=901, text="正式回答：值得看"
+    )
+    assert ok2 is True and "已回复" in message2
+    row2 = db.query_one("SELECT status FROM dm_inbox WHERE msg_seqno = 901")
+    assert row2 is not None and row2["status"] == "answered"
+
+
 @pytest.mark.parametrize("unread_payload", [{}, {"follow_unread": 0}, None])
 def test_unread_zero_variants(unread_payload: Any) -> None:
     assert unread_count(unread_payload) == 0

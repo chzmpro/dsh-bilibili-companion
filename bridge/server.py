@@ -461,9 +461,11 @@ async def read_source_tool(
         "**主动私信主人**（公开写入，但接收者硬编码为 owner_mid）。"
         "用于「推荐视频」这类主动推送，不是回复某条私信。"
         "写之前请**真的读过**内容，说清「为什么值得看」，不要复述标题。"
+        "可选 `share_bvid`：带上视频分享卡片（B站 web 接口不支持卡片时会自动降级为"
+        "带标题/链接的文本，不会报错）。"
     ),
 )
-async def dm_push_tool(text: str) -> dict[str, Any]:
+async def dm_push_tool(text: str, share_bvid: str = "") -> dict[str, Any]:
     """主动发一条私信给主人（**不是回复**，不需要 msg_seqno）。
 
     ★ 为什么单独做一个工具：`dm_reply` 必须有 `msg_seqno`（回复某条），
@@ -472,6 +474,10 @@ async def dm_push_tool(text: str) -> dict[str, Any]:
 
     ★ 硬性要求（写进工具描述里，模型看得见）：
     文本必须基于**真实读过的内容**，说清价值，不许复述标题。
+
+    ★ 2026-10-18（R2）：新增可选 ``share_bvid``。B站 web 私信接口实测只接受
+    ``msg_type=1``，卡片会被 ``-400`` 拒绝 → `core.dm` 会**自动降级**成排版文本；
+    所以这个参数不会失败，只是"能卡片就卡片、不能就带链接的文本"。
     """
     from core.dm import MAX_DM_CHARS, dm_reply_allowed
 
@@ -490,6 +496,20 @@ async def dm_push_tool(text: str) -> dict[str, Any]:
     if not allowed:
         return R.fail(R.BLOCKED, f"私信门禁拒绝：{reason}")
 
+    share_title = ""
+    share_author = ""
+    share_aid = 0
+    bvid = (share_bvid or "").strip()
+    if bvid:
+        if not bvid.startswith("BV"):
+            return R.fail(R.INVALID_ARGUMENT, "share_bvid 形如 BV1xxxxxxxxx")
+        video = runtime.db.get_video(bvid)
+        if video is None:
+            return R.fail(R.DRAFT_NOT_FOUND, f"库里没有 {bvid}，不能发分享卡片")
+        share_title = str(video["title"] or "")
+        share_author = str(video["up_name"] or "")
+        share_aid = int(video["aid"] or 0)
+
     from core.dm import send_to_owner
 
     bundle = await _load_cookie_bundle()
@@ -498,7 +518,14 @@ async def dm_push_tool(text: str) -> dict[str, Any]:
 
     try:
         result = await send_to_owner(
-            config=runtime.config, cookies=bundle, text=body, db=runtime.db
+            config=runtime.config,
+            cookies=bundle,
+            text=body,
+            db=runtime.db,
+            share_bvid=bvid,
+            share_title=share_title,
+            share_author=share_author,
+            share_aid=share_aid,
         )
     except Exception as exc:  # noqa: BLE001 —— 发送失败要如实返回
         return R.fail(R.PLATFORM_ERROR, f"发送失败：{type(exc).__name__}")
@@ -507,6 +534,7 @@ async def dm_push_tool(text: str) -> dict[str, Any]:
         {
             "msg_key": str(getattr(result, "msg_key", "") or ""),
             "chars": len(body),
+            "share_bvid": bvid,
         }
     )
 
@@ -543,7 +571,7 @@ async def dm_inbox_tool(limit: int | None = None) -> dict[str, Any]:
     db.migrate()  # 确保 v10 表存在
 
     rows = db.query(
-        "SELECT msg_seqno, text, title, bvid, received_at "
+        "SELECT msg_seqno, text, title, bvid, received_at, acked_at, ack_text "
         "FROM dm_inbox WHERE status = 'pending' "
         "ORDER BY received_at ASC LIMIT ?",
         (cap,),
@@ -557,6 +585,9 @@ async def dm_inbox_tool(limit: int | None = None) -> dict[str, Any]:
             "bvid": str(row["bvid"] or ""),
             "received_at": int(row["received_at"]),
             "when": _format_ts(int(row["received_at"])),
+            # ★ 豆包可能已经先回了一条占位；DSH 仍应用 dm_reply 给正式回答。
+            "acked": row["acked_at"] is not None,
+            "ack_text": str(row["ack_text"] or ""),
         }
         for row in rows
     ]
@@ -568,6 +599,7 @@ async def dm_inbox_tool(limit: int | None = None) -> dict[str, Any]:
             "next": (
                 "读 items[*].text，**自己判断该怎么回**（别用模板），"
                 "然后调 dm_reply(msg_seqno=..., text=...)。"
+                "items[*].acked=true 表示豆包已经先回过占位，你仍然给出**更完整的正式回答**。"
                 if items
                 else "没有待回复的私信。"
             ),
@@ -1187,6 +1219,55 @@ async def save_analysis(
 # ---------------------------------------------------------------------------
 # 8. list_drafts
 # ---------------------------------------------------------------------------
+
+
+@server.tool(
+    name="search_notes",
+    description="按关键词检索以前 save_analysis 保存的知识笔记（只读，短结果）。",
+)
+async def search_notes(query: str, limit: int = 5) -> dict[str, Any]:
+    """搜以前学过的内容（R5）。
+
+    为什么需要它：DSH 的会话会换、上下文会丢；`notes` 表里明明存着
+    上轮学到的结论，但工具列表里没有入口。这里给一个**只读、短结果**的入口。
+    """
+    needle = (query or "").strip()
+    if not needle:
+        return R.fail(R.INVALID_ARGUMENT, "query 不能为空")
+    if limit < 1 or limit > 20:
+        return R.fail(R.INVALID_ARGUMENT, "limit 必须在 1..20")
+
+    try:
+        runtime = await get_runtime()
+    except ConfigError as exc:
+        return R.fail(R.NOT_CONFIGURED, str(exc))
+
+    rows = runtime.db.search_notes(query=needle, limit=limit)
+    notes = []
+    for row in rows:
+        try:
+            facts = json.loads(str(row["facts_json"] or "[]"))
+        except ValueError:
+            facts = []
+        notes.append(
+            {
+                "bvid": str(row["bvid"]),
+                "title": str(row["title"] or ""),
+                "score": int(row["score_total"] or 0),
+                "summary": str(row["summary"] or "")[:300],
+                "facts": [str(item)[:160] for item in facts[:3]],
+                "tags": str(row["knowledge_tags"] or "")[:200],
+                "evidence_level": str(row["evidence_level"] or ""),
+            }
+        )
+    return R.ok(
+        {
+            "query": needle,
+            "matches": len(notes),
+            "notes": notes,
+            "note": "完整内容留在本地；这里只回短结果，避免把上下文撑大。",
+        }
+    )
 
 
 @server.tool(

@@ -1237,12 +1237,80 @@ class Database:
             (bvid, verdict, note, now_ts()),
         )
 
+    def search_notes(self, *, query: str, limit: int = 5) -> list[sqlite3.Row]:
+        """按关键词搜**知识笔记**（R5，只读）。
+
+        搜索范围：summary / facts / inferences / doubts / knowledge_tags。
+        只返回少量字段；完整内容仍在库里，由 DSH 按需再看。
+        """
+        needle = (query or "").strip()
+        if not needle:
+            return []
+        like = f"%{needle}%"
+        return self.query(
+            """
+            SELECT n.bvid, v.title, n.score_total, n.summary, n.facts_json,
+                   n.knowledge_tags, n.evidence_level, n.updated_at
+              FROM notes n
+              LEFT JOIN videos v ON v.bvid = n.bvid
+             WHERE n.summary LIKE ? OR n.facts_json LIKE ?
+                OR n.inferences_json LIKE ? OR n.doubts_json LIKE ?
+                OR n.knowledge_tags LIKE ?
+             ORDER BY n.score_total DESC, n.updated_at DESC
+             LIMIT ?
+            """,
+            (like, like, like, like, like, max(1, min(int(limit), 20))),
+        )
+
     def feedback_map(self) -> dict[str, str]:
         rows = self.query("SELECT bvid, verdict FROM feedback ORDER BY created_at DESC")
         result: dict[str, str] = {}
         for row in rows:
             result.setdefault(str(row["bvid"]), str(row["verdict"]))
         return result
+
+    def feedback_signals(self, *, limit: int = 5) -> dict[str, list[str]]:
+        """把反馈聚合成**可解释的偏好信号**（R4，2026-10-18）。
+
+        不额外调模型，只用本地数据：
+
+        * **UP**：同一 UP 被标 useful 多于 not_useful → 喜欢；反之 → 不喜欢；
+        * **发现关键词**：``videos.discovery_keyword`` 的净反馈，同理。
+
+        返回 ``{"liked_ups": [...], "disliked_ups": [...],
+        "liked_keywords": [...], "disliked_keywords": [...]}``。
+        数据不足就是空列表 —— 绝不硬猜。
+        """
+        rows = self.query(
+            "SELECT v.up_name AS up_name, v.discovery_keyword AS keyword, f.verdict AS verdict "
+            "  FROM feedback f JOIN videos v ON v.bvid = f.bvid"
+        )
+        up_score: dict[str, int] = {}
+        keyword_score: dict[str, int] = {}
+        for row in rows:
+            delta = 1 if str(row["verdict"]) == "useful" else -1
+            up_name = str(row["up_name"] or "").strip()
+            keyword = str(row["keyword"] or "").strip()
+            if up_name:
+                up_score[up_name] = up_score.get(up_name, 0) + delta
+            if keyword:
+                keyword_score[keyword] = keyword_score.get(keyword, 0) + delta
+
+        def _pick(scores: dict[str, int], *, positive: bool) -> list[str]:
+            items = [
+                (name, score)
+                for name, score in scores.items()
+                if (score > 0 if positive else score < 0)
+            ]
+            items.sort(key=lambda item: (abs(item[1]), item[0]), reverse=True)
+            return [name for name, _score in items[:limit]]
+
+        return {
+            "liked_ups": _pick(up_score, positive=True),
+            "disliked_ups": _pick(up_score, positive=False),
+            "liked_keywords": _pick(keyword_score, positive=True),
+            "disliked_keywords": _pick(keyword_score, positive=False),
+        }
 
 
 def _start_of_today() -> int:

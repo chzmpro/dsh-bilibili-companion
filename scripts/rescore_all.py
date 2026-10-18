@@ -96,7 +96,7 @@ def select_targets(
 ) -> list[dict[str, Any]]:
     """按范围挑出要重算的视频（只挑**有证据**的）。"""
     sql = (
-        "SELECT v.bvid, v.aid, v.title, v.source_url, v.first_seen_at "
+        "SELECT v.bvid, v.aid, v.title, v.up_name, v.source_url, v.first_seen_at "
         "FROM videos v WHERE EXISTS ("
         "  SELECT 1 FROM evidence e "
         "  WHERE e.bvid = v.bvid AND e.availability = 'available')"
@@ -131,6 +131,7 @@ def select_targets(
             "bvid": str(row["bvid"]),
             "aid": int(row["aid"] or 0),
             "title": str(row["title"] or ""),
+            "up_name": str(row["up_name"] or ""),
             "source_url": str(row["source_url"] or ""),
         }
         for row in rows
@@ -185,6 +186,7 @@ async def rescore_all(
                 #   不知道"对谁有用"，只能按内容充实度打分
                 #   —— 这正是主人反馈"没什么用却高分"的根因。
                 focus=focus,
+                up_name=str(target.get("up_name") or ""),
             )
         except Exception as exc:  # noqa: BLE001 —— 单条失败不该中断整批
             print(f" ❌ {type(exc).__name__}")

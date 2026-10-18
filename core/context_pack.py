@@ -408,6 +408,10 @@ def build_focus(db: Any, config: Any) -> dict[str, list[str]]:
         "rules": [],
         "likes": [],
         "dislikes": [],
+        "liked_ups": [],
+        "disliked_ups": [],
+        "liked_keywords": [],
+        "disliked_keywords": [],
     }
     try:
         discovery = getattr(config, "discovery", None)
@@ -431,6 +435,14 @@ def build_focus(db: Any, config: Any) -> dict[str, list[str]]:
                 focus["likes"].append(content)
             elif kind == "dislike":
                 focus["dislikes"].append(content)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # R4：主人反馈聚合出的 UP / 发现关键词偏好（本地数据，不调模型）
+    try:
+        signals = db.feedback_signals()
+        for key in ("liked_ups", "disliked_ups", "liked_keywords", "disliked_keywords"):
+            focus[key] = list(signals.get(key, []))
     except Exception:  # noqa: BLE001
         pass
 

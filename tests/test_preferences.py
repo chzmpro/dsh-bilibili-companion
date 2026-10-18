@@ -126,6 +126,6 @@ def test_schema_version_is_14() -> None:
     """
     from core import schema
 
-    assert schema.SCHEMA_VERSION == 14
+    assert schema.SCHEMA_VERSION == 15
     versions = [v for v, _ in schema.MIGRATIONS]
-    assert versions == list(range(1, 15)), "迁移版本必须连续"
+    assert versions == list(range(1, 16)), "迁移版本必须连续"

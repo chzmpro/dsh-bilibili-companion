@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.dm import MAX_DM_CHARS, dm_reply_allowed
-from core.dm_live import poll_once, reply_to
+from core.dm_live import ack_to, poll_once
 from core.dm_reply_gen import generate_reply
 from core.storage import Database
 
@@ -172,6 +172,9 @@ class DmWatcher:
         deliver_delay_seconds: int = DEFAULT_DELIVER_DELAY_SECONDS,
         db_factory: Any = None,
         queue_factory: Any = None,
+        auto_cycle: bool = False,
+        cycle_start_delay: int = 60,
+        cycle_interval: int = 60,
     ) -> None:
         """Args:
         db: 已建好的连接（**仅在调用方与监听在同一线程时**用）。
@@ -219,6 +222,11 @@ class DmWatcher:
         self._started_at = time.time()
         self.stats = WatchStats()
         self._stop = False
+        #: R1：是否随 DSH 自动跑学习轮（默认关；插件会显式传 --cycle）
+        self.auto_cycle = bool(auto_cycle)
+        self.cycle_start_delay = max(0, int(cycle_start_delay))
+        self.cycle_interval = max(5, int(cycle_interval))
+        self._scheduler: Any = None
 
     def _handle(self) -> Database:
         """取本次调用该用的 DB 句柄。
@@ -308,6 +316,8 @@ class DmWatcher:
     def stop(self) -> None:
         """请求停止（面板的"停止"按钮调它）。"""
         self._stop = True
+        if self._scheduler is not None:
+            self._scheduler.stop()
 
     @property
     def stopped(self) -> bool:
@@ -363,18 +373,28 @@ class DmWatcher:
                 target = outcome.new_messages[-1]
                 text = await self._compose_reply(outcome.new_messages)
                 if text:
-                    ok, message = await reply_to(
-                        db=self._handle(),
-                        config=self.config,
-                        cookies=self.cookies,
-                        msg_seqno=int(target["msg_seqno"]),
-                        text=text,
+                    db = self._handle()
+                    seqno = int(target["msg_seqno"])
+                    row = db.query_one(
+                        "SELECT acked_at FROM dm_inbox WHERE msg_seqno = ?", (seqno,)
                     )
-                    if ok:
-                        replied += 1
-                        self.stats.add("replied", f"已回 {target['msg_seqno']}")
+                    if row is not None and row["acked_at"] is not None:
+                        self.stats.add("skipped", f"seqno={seqno} 已先回过占位，跳过")
                     else:
-                        self.stats.add("skipped", message)
+                        # ★ R3：豆包这条只是**先回占位**，不写 dm_replies、
+                        #   不改 status ⇒ DSH 之后仍能用 dm_reply 正式回答。
+                        ok, message = await ack_to(
+                            db=db,
+                            config=self.config,
+                            cookies=self.cookies,
+                            msg_seqno=seqno,
+                            text=text,
+                        )
+                        if ok:
+                            replied += 1
+                            self.stats.add("replied", f"已先回占位 {seqno}")
+                        else:
+                            self.stats.add("skipped", message)
 
         self.stats.replied += replied
         return {
@@ -476,6 +496,8 @@ class DmWatcher:
             "【主人的新私信】" + text + chr(10) + chr(10)
             + "请调用 dm_inbox 取出待回复的私信，用你自己的判断写回复，"
             + "然后调 dm_reply 发出。不要用模板。"
+            + "（如果豆包已经先回过一条占位，你仍然用 dm_reply 给出正式回答；"
+            + "占位不会占用你的回复名额。）"
         )
         try:
             from core.dm_deliver import deliver_async
@@ -559,6 +581,27 @@ class DmWatcher:
 
     # ---- 主循环 ------------------------------------------------------------
 
+    async def _cycle_loop(self) -> None:
+        """随 DSH 自动跑学习轮（R1）——与私信监听共用这个常驻进程。"""
+        from core.cycle_scheduler import CycleScheduler
+
+        scheduler = CycleScheduler(
+            db=self._handle(),
+            config=self.config,
+            session_id=self._duty_session_id(),
+            start_delay=self.cycle_start_delay,
+            check_interval=self.cycle_interval,
+        )
+        self._scheduler = scheduler
+        self.stats.add("poll", "自动学习轮已启用（跟随 DSH 启停）")
+        try:
+            await scheduler.run()
+        except asyncio.CancelledError:
+            scheduler.stop()
+            raise
+        except Exception as exc:  # noqa: BLE001 - 调度失败不能让监听死
+            self.stats.add("error", f"自动学习轮异常：{type(exc).__name__}: {exc}")
+
     async def run(self) -> None:
         """**常驻**循环 —— 这就是"能及时回复"的关键。
 
@@ -566,6 +609,9 @@ class DmWatcher:
         我们直接按配置的间隔 sleep，省一点空转。
         """
         self.stats.add("poll", f"监听已启动（每 {self.interval} 秒查一次未读）")
+        cycle_task = (
+            asyncio.create_task(self._cycle_loop()) if self.auto_cycle else None
+        )
         while not self._stop:
             try:
                 await self.poll_once_round()
@@ -585,4 +631,8 @@ class DmWatcher:
                 await asyncio.sleep(min(1.0, self.interval - slept))
                 slept += 1.0
 
+        if cycle_task is not None:
+            cycle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await cycle_task
         self.stats.add("poll", "监听已停止")
