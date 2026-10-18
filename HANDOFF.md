@@ -19,6 +19,8 @@ schema v14 · dm_inbox 待回复 0
 > ★ **2026-10-18 已完成 Codex 审查整改**（#2 字幕全量/分块、#3 整包预算、
 > #4 发布读回 + `sent_pending_verify`、#5 写侧健康传播、#6 token 口径）。
 > 生产闭环（#1）仍是**立项未实现**，见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md)。
+>
+> 📖 **人用操作手册**：[`docs/user-manual.md`](docs/user-manual.md)（安装/日常/审批/排障）。
 
 **当前红线（一个都没动）**：`mode=observe` · `dry_run=true` · `publish_enabled=false`
 ⇒ **任何公开写入（点赞/收藏/评论）都会被代码层拒绝**。这是设计，不是故障。

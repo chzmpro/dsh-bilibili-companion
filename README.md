@@ -1,9 +1,16 @@
 # dsh-bilibili-companion
 
-**给 DSH 一个专用 B 站小号**：定时自己找视频、读字幕、判断值不值得推荐、
+**给 DSH 一个专用 B 站小号**：找视频、读字幕、判断值不值得推荐、
 写评论草稿、受控发布、回复讨论，并把值得看的视频 `@` 汇报给主号。
+（自动定时执行器还没实现，见 [已知限制](docs/acceptance.md#7-已知限制与未完成项汇总)）
 
-按 [`D:/DeepSeek/docs/DSH_EXECUTION_BRIEF.md`](../../docs/DSH_EXECUTION_BRIEF.md)（310 行权威任务书）实现。
+按项目任务书实现（任务书原文不在本仓库；环境与许可边界见
+[`docs/compatibility.md`](docs/compatibility.md)）。
+
+> 📖 **人用操作手册**：[`docs/user-manual.md`](docs/user-manual.md) ——
+> 安装、日常操作、草稿审批、私信、故障排查，一页看完。
+>
+> 本 README 偏技术细节与验收证据；第一次用请先看操作手册。
 
 ---
 
@@ -630,9 +637,9 @@ interaction:
 export PYTHONIOENCODING=utf-8
 
 # 质量门（全绿才提交）
-./.venv/Scripts/python.exe -m pytest tests/          # 733 passed
+./.venv/Scripts/python.exe -m pytest tests/          # 1087 passed, 1 skipped
 ./.venv/Scripts/python.exe -m ruff check core bridge cli tests scripts/
-./.venv/Scripts/python.exe -m mypy                   # strict, 39 files
+./.venv/Scripts/python.exe -m mypy                   # strict, 53 files
 
 # 插件预检（不重启 DSH 就能知道插件能不能加载）
 cd plugin && node selfcheck.mjs
