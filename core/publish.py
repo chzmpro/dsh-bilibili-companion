@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from dataclasses import field as _field
 from typing import Any, Protocol
 
+from core import health
 from core.bilibili import BilibiliReader
 from core.health import BLOCKING_STATES
 from core.storage import (
@@ -147,6 +148,62 @@ class PublishGate:
         self.config = config
         self.reader = reader
         self.executor = executor
+
+    # ---- 写侧健康传播 ------------------------------------------------------
+
+    def _record_write_failure(self, exc: BaseException) -> None:
+        """把写请求的稳定错误码交给**同一套**全局健康状态机（#5）。
+
+        ★ 为什么不能只把当前动作置 ``uncertain``：
+        写请求走的是独立 httpx 客户端，不经过读队列；如果 ``-412`` 只冻结
+        当前草稿，其它 BV、其它互动类型的后续动作仍会按 ``ready`` 放行。
+
+        ★ 不把一般业务错误升级成验证码：
+        只有 ``BILI_CODE_*`` / ``HTTP_*`` 这类**平台响应码**才进分类器；
+        网络错误 / 响应不是 JSON 属于"结果未知"，不改变平台健康状态。
+        """
+        raw_code = getattr(exc, "code", None)
+        http_status = getattr(exc, "http_status", None)
+        biz_code: str | None = None
+        if isinstance(raw_code, str) and raw_code.startswith("BILI_CODE_"):
+            biz_code = raw_code[len("BILI_CODE_") :]
+        elif isinstance(raw_code, str) and raw_code.startswith("HTTP_"):
+            suffix = raw_code[len("HTTP_") :]
+            if suffix.isdigit():
+                http_status = int(suffix)
+
+        if biz_code is None and http_status is None:
+            return
+
+        message = str(exc)
+        queue = getattr(self.reader, "queue", None)
+        if queue is not None:
+            try:
+                queue.record_response(
+                    code=biz_code, http_status=http_status, message=message
+                )
+                return
+            except Exception:  # noqa: BLE001 - 连续限流会在落库后抛，不重复升级
+                if self.db.health_state() in BLOCKING_STATES:
+                    return
+
+        verdict = health.classify(code=biz_code, http_status=http_status, message=message)
+        if verdict.state == health.READY:
+            return
+        self.db.record_health(
+            state=verdict.state,
+            raw_code=biz_code if biz_code is not None else str(http_status),
+            category=verdict.category,
+            detail=verdict.human_action,
+        )
+
+    @staticmethod
+    def _stable_error_code(exc: BaseException) -> str:
+        """保留稳定的平台错误码；没有就用异常类名（不编造）。"""
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and code:
+            return code
+        return type(exc).__name__
 
     # ---- 门禁 --------------------------------------------------------------
 
@@ -550,9 +607,11 @@ class PublishGate:
                     text=str(draft["text"]),
                 )
         except Exception as exc:  # noqa: BLE001 - 任何异常都不得当作成功
-            # 点击后异常 → uncertain，冻结，不自动重发
+            # 点击后异常 → uncertain，冻结，不自动重发；同时传播写侧风控
+            self._record_write_failure(exc)
             self.db.settle_action(
-                action_id=action_id, status="uncertain", error_code=type(exc).__name__
+                action_id=action_id, status="uncertain",
+                error_code=self._stable_error_code(exc),
             )
             self.db.set_draft_status(draft_id, "uncertain")
             return PublishResult(
@@ -657,8 +716,10 @@ class PublishGate:
         try:
             result = await self.executor.like_video(bvid=bvid)
         except Exception as exc:  # noqa: BLE001 - 任何异常都不得当作成功
+            self._record_write_failure(exc)
             self.db.settle_action(
-                action_id=action_id, status="uncertain", error_code=type(exc).__name__
+                action_id=action_id, status="uncertain",
+                error_code=self._stable_error_code(exc),
             )
             return PublishResult(
                 False, "PUBLISH_UNCERTAIN", action_id=action_id,
@@ -751,8 +812,10 @@ class PublishGate:
         try:
             result = await self.executor.favorite_video(aid=aid, add_media_ids=[media_id])
         except Exception as exc:  # noqa: BLE001
+            self._record_write_failure(exc)
             self.db.settle_action(
-                action_id=action_id, status="uncertain", error_code=type(exc).__name__
+                action_id=action_id, status="uncertain",
+                error_code=self._stable_error_code(exc),
             )
             return PublishResult(
                 False, "PUBLISH_UNCERTAIN", action_id=action_id,

@@ -62,10 +62,15 @@ DEFAULT_WRITE_TIMEOUT = 20.0
 
 
 class WriteError(RuntimeError):
-    """写操作失败。``code`` 是稳定的语义码，不是异常字符串。"""
+    """写操作失败。``code`` 是稳定的语义码，不是异常字符串。
 
-    def __init__(self, code: str, message: str = "") -> None:
+    ``http_status`` 保留原始 HTTP 状态（若来自非 200 响应），供全局健康状态机
+    区分 ``-412`` / ``-509`` / HTTP 429 等风控语义 —— **不能只留异常类名**。
+    """
+
+    def __init__(self, code: str, message: str = "", *, http_status: int | None = None) -> None:
         self.code = code
+        self.http_status = http_status
         super().__init__(message or code)
 
 
@@ -155,9 +160,26 @@ class HttpWriteExecutor:
         try:
             body = response.json()
         except ValueError as exc:
+            if response.status_code >= 400:
+                raise WriteError(
+                    f"HTTP_{response.status_code}",
+                    f"HTTP {response.status_code}：响应不是合法 JSON，结果未知。",
+                    http_status=response.status_code,
+                ) from exc
             raise WriteError("WRITE_BAD_JSON", "响应不是合法 JSON：结果未知。") from exc
         if not isinstance(body, dict):
             raise WriteError("WRITE_BAD_SHAPE", "响应结构异常。")
+        if response.status_code >= 400:
+            # ★ 保留 HTTP 状态，供发布侧交给全局健康状态机（#5）。
+            #   仍优先用 B 站业务 code；没有 code 时按 HTTP 状态分类。
+            if body.get("code") is None:
+                message = str(body.get("message") or body.get("msg") or "")
+                raise WriteError(
+                    f"HTTP_{response.status_code}",
+                    message or f"HTTP {response.status_code}：结果未知。",
+                    http_status=response.status_code,
+                )
+            body = {**body, "_http_status": response.status_code}
         return body
 
     @staticmethod
@@ -169,7 +191,13 @@ class HttpWriteExecutor:
             numeric = -1
         if numeric not in ok_codes:
             message = str(body.get("message") or body.get("msg") or "")
-            raise WriteError(f"BILI_CODE_{numeric}", message or f"接口返回 {numeric}")
+            raw_status = body.get("_http_status")
+            http_status = raw_status if isinstance(raw_status, int) else None
+            raise WriteError(
+                f"BILI_CODE_{numeric}",
+                message or f"接口返回 {numeric}",
+                http_status=http_status,
+            )
         return numeric
 
     # ---- 点赞 --------------------------------------------------------------
