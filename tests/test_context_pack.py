@@ -29,6 +29,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from core import context_pack
 from core.context_pack import (
     BLOCK_LIMITS,
@@ -153,12 +155,13 @@ def test_owner_voice_survives_broken_db() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_find_agents_md_finds_something() -> None:
-    """★ 全局那份才全（项目内不含网络通道/铁律）。"""
+def test_find_agents_md_prefers_dsh_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置的全局文档优先于项目文档，不依赖本机全局文件大小。"""
+    expected = tmp_path / "AGENTS.md"
+    expected.write_text("# Global test instructions\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_HOME", str(tmp_path))
     found = find_agents_md()
-    assert found is not None, "本机应该能找到 AGENTS.md"
-    assert found.is_file()
-    assert found.stat().st_size > 10_000, "应该是全局那份（更大更全）"
+    assert found == expected
 
 
 def test_find_agents_md_falls_back_to_project() -> None:
@@ -174,7 +177,7 @@ def test_find_agents_md_falls_back_to_project() -> None:
         found = find_agents_md()
         # 本机项目内有 AGENTS.md ⇒ 应该找到它（而不是 None）
         assert found is not None
-        assert "dsh-bilibili-companion" in str(found).replace("\\", "/")
+        assert found == Path(context_pack.__file__).resolve().parent.parent / "AGENTS.md"
     finally:
         if old_home is not None:
             os.environ["DSH_HOME"] = old_home

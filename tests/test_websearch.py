@@ -66,19 +66,14 @@ def _payload(*, items: list[dict[str, Any]], status: str = "ok") -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_cache_dir_is_inside_project() -> None:
-    """★★ npm 缓存必须落在**项目内** —— 否则 npm 会 EPERM。
+def test_cache_dir_is_inside_configured_data_dir() -> None:
+    """npm 缓存遵循可写数据目录覆盖，不退回系统 npm-cache。"""
+    from pathlib import Path
 
-    真机报错原文：
-        npm error code EPERM
-        npm error path C:\\Users\\<用户>\\AppData\\Local\\npm-cache\\_cacache\\tmp\\...
-    """
-    from core.paths import project_root
+    from core.paths import data_dir
 
     path = cache_dir()
-    root = str(project_root())
-    assert path.startswith(root), f"npm 缓存在项目外：{path}"
-    assert "npm-cache" in path
+    assert Path(path) == data_dir() / "npm-cache"
 
 
 def test_cache_dir_is_created() -> None:

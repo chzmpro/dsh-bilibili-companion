@@ -91,8 +91,10 @@ def test_all_derived_paths_live_under_data_dir(
 
 
 def test_project_root_helpers() -> None:
-    assert paths.project_root().name == "dsh-bilibili-companion"
+    assert (paths.project_root() / "pyproject.toml").is_file()
+    assert (paths.project_root() / "core" / "paths.py").is_file()
     assert paths.example_config_path().name == "config.example.yaml"
+    assert paths.example_config_path().parent == paths.project_root()
 
 
 def test_config_path_honours_env_override(

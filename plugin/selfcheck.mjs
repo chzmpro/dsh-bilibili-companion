@@ -39,17 +39,9 @@ process.env.DSH_HOME = sandbox
 //    （谷时开关要写进去再读回来），**绝不能碰主人的真配置**。
 const fakeProject = join(sandbox, 'fake-project')
 mkdirSync(fakeProject, { recursive: true })
-const REAL_YAML = 'D:/DeepSeek/projects/dsh-bilibili-companion/config.example.yaml'
-if (existsSync(REAL_YAML)) {
-  // 用 example 当模板：它结构完整、且本来就不是"活配置"
-  copyFileSync(REAL_YAML, join(fakeProject, 'config.yaml'))
-} else {
-  writeFileSync(
-    join(fakeProject, 'config.yaml'),
-    'schedule:\n  peak_valley: false\ndiscovery:\n  keywords:\n    - "x"\n',
-    'utf8',
-  )
-}
+// 始终使用当前 checkout 的完整示例，不依赖作者的安装目录。
+// 示例缺失时应让自检失败，而不是使用缺字段的模板制造假故障。
+copyFileSync(join(here, '..', 'config.example.yaml'), join(fakeProject, 'config.yaml'))
 
 const failures = []
 function ok(condition, label) {
