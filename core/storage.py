@@ -488,7 +488,7 @@ class Database:
                 status = str(existing["status"])
                 if status == "uncertain":
                     return str(existing["action_id"]), "uncertain_pending"
-                if status in ("sent_verified", "failed"):
+                if status in ("sent_verified", "sent_pending_verify", "failed"):
                     return str(existing["action_id"]), "duplicate"
                 if status == "reserved":
                     # 上一次预留没有结论 → 视为不确定，冻结
@@ -529,7 +529,7 @@ class Database:
         remote_url: str | None = None,
         error_code: str | None = None,
     ) -> None:
-        if status not in ("sent_verified", "uncertain", "failed"):
+        if status not in ("sent_verified", "sent_pending_verify", "uncertain", "failed"):
             raise ValueError(f"非法终态: {status}")
         self.execute(
             """
@@ -547,14 +547,15 @@ class Database:
     ) -> int:
         """今日已占用额度的动作数。
 
-        ★ **``reserved`` 与 ``uncertain`` 都计入**——任务书 §5：
-        "``uncertain`` 占用额度，不靠时间自动释放，进程崩溃后不超额"。
+        ★ **``reserved`` / ``uncertain`` / ``sent_pending_verify`` 都计入**——
+        任务书 §5："``uncertain`` 占用额度，不靠时间自动释放，进程崩溃后不超额"。
+        待核验的评论**已经发出去了**，当然也要占额度。
         """
         start_of_day = _start_of_today()
         sql = (
             "SELECT COUNT(*) AS n FROM actions "
             " WHERE action_type = ? AND is_simulated = ? AND created_at >= ? "
-            "   AND status IN ('reserved','sent_verified','uncertain')"
+            "   AND status IN ('reserved','sent_verified','sent_pending_verify','uncertain')"
         )
         params: list[Any] = [action_type, 1 if is_simulated else 0, start_of_day]
         if agent_mid is not None:
@@ -571,7 +572,7 @@ class Database:
               JOIN drafts d ON d.draft_id = a.draft_id
              WHERE a.action_type = 'reply' AND a.is_simulated = ?
                AND a.created_at >= ?
-               AND a.status IN ('reserved','sent_verified','uncertain')
+               AND a.status IN ('reserved','sent_verified','sent_pending_verify','uncertain')
                AND d.target_root = ?
             """,
             (1 if is_simulated else 0, start_of_day, target_root),

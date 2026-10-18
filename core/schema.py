@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -599,6 +599,81 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         CREATE INDEX IF NOT EXISTS idx_digest_created
             ON candidate_digests(created_at DESC);
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v14 —— 发布读回核验（#4，2026-10-18）
+    # ------------------------------------------------------------------
+    #
+    # 旧状态机只有 sent_verified：**拿到 rpid 就直接算"已核验"**，
+    # 但远端作者 / 正文 / BV 一条都没读回来。真实平台还会让评论先进审核，
+    # 于是"发出去了"与"看得见且内容对"被混成同一个状态。
+    #
+    # 新增 sent_pending_verify：已取得远端 rpid（确定发过），但内容身份
+    # 尚未读回核验。它 **占额度、锁幂等键、不自动重发**。
+    # SQLite 不能直接改 CHECK，必须重建两张表。
+    (
+        14,
+        """
+        CREATE TABLE IF NOT EXISTS actions_v14 (
+            action_id       TEXT PRIMARY KEY,
+            agent_mid       INTEGER NOT NULL,
+            action_type     TEXT NOT NULL,
+            bvid            TEXT NOT NULL,
+            target_rpid     TEXT,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            draft_id        TEXT,
+            status          TEXT NOT NULL,
+            remote_rpid     TEXT,
+            remote_url      TEXT,
+            is_simulated    INTEGER NOT NULL DEFAULT 0,
+            error_code      TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            CHECK (action_type IN ('top','reply','like','favorite','dynamic')),
+            CHECK (status IN (
+                'draft','reserved','sent_verified','sent_pending_verify',
+                'uncertain','failed'
+            )),
+            CHECK (is_simulated IN (0,1))
+        );
+        INSERT OR IGNORE INTO actions_v14
+            SELECT action_id, agent_mid, action_type, bvid, target_rpid,
+                   idempotency_key, draft_id, status, remote_rpid, remote_url,
+                   is_simulated, error_code, created_at, updated_at
+              FROM actions;
+        DROP TABLE IF EXISTS actions;
+        ALTER TABLE actions_v14 RENAME TO actions;
+        CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status);
+        CREATE INDEX IF NOT EXISTS idx_actions_bvid ON actions(bvid);
+
+        CREATE TABLE IF NOT EXISTS drafts_v14 (
+            draft_id      TEXT PRIMARY KEY,
+            draft_type    TEXT NOT NULL,
+            bvid          TEXT NOT NULL,
+            target_rpid   TEXT,
+            target_root   TEXT,
+            text          TEXT NOT NULL,
+            evidence_ids  TEXT NOT NULL DEFAULT '[]',
+            status        TEXT NOT NULL DEFAULT 'pending',
+            approved_at   INTEGER,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL,
+            FOREIGN KEY (bvid) REFERENCES videos(bvid) ON DELETE CASCADE,
+            CHECK (draft_type IN ('top','reply')),
+            CHECK (status IN (
+                'pending','approved','rejected','reserved','sent_verified',
+                'sent_pending_verify','uncertain','failed','skipped'
+            ))
+        );
+        INSERT OR IGNORE INTO drafts_v14
+            SELECT draft_id, draft_type, bvid, target_rpid, target_root, text,
+                   evidence_ids, status, approved_at, created_at, updated_at
+              FROM drafts;
+        DROP TABLE IF EXISTS drafts;
+        ALTER TABLE drafts_v14 RENAME TO drafts;
+        CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
+        CREATE INDEX IF NOT EXISTS idx_drafts_bvid ON drafts(bvid);
         """,
     ),
 )

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
@@ -606,6 +607,175 @@ def append_verify_to_report(digest_path: Path | str, text: str) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class ReadbackResult:
+    """一次**发布读回核验**的结论（#4）。
+
+    与 :class:`VerifyResult` 的区别：这里回答的是"刚发出去的那条，
+    远端作者 / 正文 / 所属视频对不对"，不是"后来公开可见没有"。
+    """
+
+    ok: bool
+    reason: str
+    bvid: str = ""
+    rpid: str = ""
+    author_mid: int | None = None
+    message: str = ""
+
+
+_SPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_comment(text: str) -> str:
+    """对比评论正文：去掉空白/换行，其余**逐字**比较。"""
+    return _SPACE_RE.sub("", text or "").strip()
+
+
+async def readback_comment(
+    reader: BilibiliReader,
+    *,
+    bvid: str,
+    aid: int,
+    rpid: str,
+    agent_mid: int,
+    expected_text: str,
+    root: str = "",
+) -> ReadbackResult:
+    """读回**刚发出的**评论并核对作者 / 正文 / 所属视频（只读、不重试）。
+
+    顶层按 ``mode=2``（时间序）拉第一页；楼中楼按 ``root`` 拉那一串。
+    ``oid=aid`` 来自本地视频记录，因此"查得到这条 rpid"本身就证明了
+    它属于该 BV —— 不需要（也没有）按评论反查 bvid 的接口。
+    """
+    if not rpid:
+        return ReadbackResult(False, "NO_REMOTE_RPID", bvid=bvid)
+
+    blocked = _health_gate(reader)
+    if blocked:
+        return ReadbackResult(False, f"READBACK_BLOCKED:{blocked}", bvid=bvid, rpid=rpid)
+
+    if root and root != "0":
+        path = SUB_REPLY_PATH
+        params: dict[str, Any] = {"type": 1, "oid": aid, "root": root, "ps": 20, "pn": 1}
+    else:
+        path = TOP_REPLY_PATH
+        params = {"type": 1, "oid": aid, "mode": 2, "next": 0, "ps": 20}
+
+    page = await _fetch_page(reader, path, params)
+    if page.blocked_state:
+        return ReadbackResult(
+            False, f"READBACK_BLOCKED:{page.blocked_state}", bvid=bvid, rpid=rpid
+        )
+    if page.error:
+        return ReadbackResult(False, f"READBACK_ERROR:{page.error}", bvid=bvid, rpid=rpid)
+
+    hit = next((item for item in page.replies if item.rpid == rpid), None)
+    if hit is None:
+        return ReadbackResult(False, "READBACK_NOT_FOUND", bvid=bvid, rpid=rpid)
+    if int(hit.author_mid) != int(agent_mid):
+        return ReadbackResult(
+            False, "AUTHOR_MISMATCH", bvid=bvid, rpid=rpid,
+            author_mid=hit.author_mid, message=hit.message,
+        )
+    if root and root != "0" and str(hit.root) != str(root):
+        return ReadbackResult(
+            False, "ROOT_MISMATCH", bvid=bvid, rpid=rpid,
+            author_mid=hit.author_mid, message=hit.message,
+        )
+    if _normalize_comment(hit.message) != _normalize_comment(expected_text):
+        return ReadbackResult(
+            False, "CONTENT_MISMATCH", bvid=bvid, rpid=rpid,
+            author_mid=hit.author_mid, message=hit.message,
+        )
+    return ReadbackResult(
+        True, "OK", bvid=bvid, rpid=rpid,
+        author_mid=hit.author_mid, message=hit.message,
+    )
+
+
+async def readback_pending(
+    db: Database, reader: BilibiliReader, *, limit: int = 10
+) -> list[tuple[str, ReadbackResult]]:
+    """重试**待核验**动作的只读读回；匹配才升 ``sent_verified``（#4）。
+
+    只读、不重发；查不到 / 不匹配保持 ``sent_pending_verify`` 并记原因。
+    """
+    if limit < 1:
+        return []
+    return await _readback_pending_impl(db, reader, limit=limit)
+
+
+async def _readback_pending_impl(
+    db: Database, reader: BilibiliReader, *, limit: int
+) -> list[tuple[str, ReadbackResult]]:
+    rows = db.query(
+        """
+        SELECT a.action_id, a.bvid, a.remote_rpid, a.action_type, a.agent_mid,
+               a.target_rpid, d.draft_id AS draft_id, d.text AS draft_text,
+               d.target_root AS draft_root
+          FROM actions a
+          LEFT JOIN drafts d ON d.draft_id = a.draft_id
+         WHERE a.status = 'sent_pending_verify'
+           AND a.remote_rpid IS NOT NULL AND a.remote_rpid <> ''
+         ORDER BY a.updated_at ASC, a.created_at ASC
+         LIMIT ?
+        """,
+        (limit,),
+    )
+    results: list[tuple[str, ReadbackResult]] = []
+    for row in rows:
+        action_id = str(row["action_id"])
+        bvid = str(row["bvid"])
+        video = db.get_video(bvid)
+        aid = int(video["aid"]) if video is not None and video["aid"] is not None else 0
+        if aid <= 0:
+            result = ReadbackResult(
+                ok=False, reason="VIDEO_AID_UNKNOWN", bvid=bvid,
+                rpid=str(row["remote_rpid"] or ""),
+            )
+        else:
+            draft_text = str(row["draft_text"] or "")
+            if not draft_text:
+                result = ReadbackResult(
+                    ok=False, reason="NO_DRAFT_TEXT", bvid=bvid,
+                    rpid=str(row["remote_rpid"] or ""),
+                )
+            else:
+                root = (
+                    str(row["draft_root"] or "")
+                    if str(row["action_type"]) == "reply"
+                    else ""
+                )
+                result = await readback_comment(
+                    reader,
+                    bvid=bvid,
+                    aid=aid,
+                    rpid=str(row["remote_rpid"] or ""),
+                    agent_mid=int(row["agent_mid"] or 0),
+                    expected_text=draft_text,
+                    root=root,
+                )
+        results.append((action_id, result))
+
+        if result.ok:
+            db.settle_action(action_id=action_id, status="sent_verified")
+            draft_id = str(row["draft_id"] or "")
+            if draft_id:
+                db.set_draft_status(draft_id, "sent_verified")
+        else:
+            db.settle_action(
+                action_id=action_id,
+                status="sent_pending_verify",
+                error_code=result.reason,
+            )
+
+        if db.health_state() in health.BLOCKING_STATES:
+            break
+        await _pause(ITEM_PAUSE_SECONDS)
+
+    return results
+
+
 __all__ = [
     "HEALTH_BLOCKED_HOW",
     "ITEM_PAUSE_SECONDS",
@@ -619,9 +789,12 @@ __all__ = [
     "VIDEO_INFO_PAUSE_SECONDS",
     "VISIBLE_TTL_SECONDS",
     "SentRecord",
+    "ReadbackResult",
     "VerifyResult",
     "VerifyRuntime",
     "append_verify_to_report",
+    "readback_comment",
+    "readback_pending",
     "recent_sent_records",
     "verify_one",
     "verify_recent",

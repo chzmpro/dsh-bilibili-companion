@@ -315,6 +315,47 @@ def verify_recent_cmd(
             typer.echo("（今天还没有日报，所以没追加 —— 不硬造一份）")
 
 
+@app.command("verify-pending")
+def verify_pending_cmd(
+    limit: int = typer.Option(10, "--limit", help="最多重试几条待核验动作"),
+) -> None:
+    """只读重试 ``sent_pending_verify`` 的**读回核验**（#4，不再发一次）。
+
+    发布后立即读回常常“查不到”（审核延迟 / 翻页），所以状态先落
+    ``sent_pending_verify``。等一会儿再跑这条命令：远端作者、正文、所属视频
+    全部匹配才升 ``sent_verified``；查不到只记原因，**绝不重发**。
+    """
+    _configure_stdio()
+    import asyncio
+
+    from core.runtime import build_runtime
+    from core.verify import readback_pending
+
+    async def _run() -> Any:
+        runtime = await build_runtime(with_worker=False)
+        try:
+            return await readback_pending(runtime.db, runtime.reader, limit=limit)
+        finally:
+            await runtime.aclose()
+
+    try:
+        results = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"待核验读回失败：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not results:
+        typer.echo("没有待核验的动作。")
+        return
+    verified = sum(1 for _action_id, result in results if result.ok)
+    typer.echo(f"重试 {len(results)} 条：核验通过 {verified} 条，其余仍待核验。")
+    for action_id, result in results:
+        mark = "✅" if result.ok else "⏳"
+        typer.echo(f"  {mark} {action_id} rpid={result.rpid or '-'} —— {result.reason}")
+        if not result.ok and result.message:
+            typer.echo(f"     远端正文：{result.message[:80]}")
+
+
 @app.command("sources")
 def sources_cmd(
     repo: str = typer.Option("", "--repo", help="顺手测一个仓库（owner/repo）"),

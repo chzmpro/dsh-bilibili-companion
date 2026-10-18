@@ -1259,7 +1259,12 @@ async def publish_draft(draft_id: str) -> dict[str, Any]:
 
     from core.publish import PublishGate
 
-    gate = PublishGate(db=runtime.db, config=runtime.config, reader=runtime.reader)
+    gate = PublishGate(
+        db=runtime.db,
+        config=runtime.config,
+        reader=runtime.reader,
+        executor=_make_write_executor(runtime),
+    )
     result = await gate.publish(draft_id=draft_id)
     payload = {
         "draft_id": draft_id,
@@ -1470,7 +1475,12 @@ async def publish_reply(draft_id: str) -> dict[str, Any]:
 
     from core.publish import PublishGate
 
-    gate = PublishGate(db=runtime.db, config=runtime.config, reader=runtime.reader)
+    gate = PublishGate(
+        db=runtime.db,
+        config=runtime.config,
+        reader=runtime.reader,
+        executor=_make_write_executor(runtime),
+    )
     result = await gate.publish(draft_id=draft_id)
     payload = {
         "draft_id": draft_id,

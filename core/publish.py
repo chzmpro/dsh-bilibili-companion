@@ -13,11 +13,15 @@
 9. 配额（顶层/回复/单串回复）+ **幂等键**：
    顶层 ``agent_mid+bvid+top``；回复 ``agent_mid+target_rpid+reply``
 
-## 状态机（任务书 §5）
+## 状态机（任务书 §5 + 2026-10-18 审查修正）
 
-``draft → reserved → sent_verified``；不确定 → ``uncertain``。
+``draft → reserved → sent_pending_verify → sent_verified``；不确定 → ``uncertain``。
 
 * ``reserved`` **在点击前**持久化（事务内）。
+* 取得远端 ``rpid`` 只算 ``sent_pending_verify``：**已确定发过，但尚未读回
+  核对作者 / 正文 / 所属视频**。读回匹配才升 ``sent_verified``。
+* ``sent_pending_verify`` 与 ``sent_verified`` 一样**占额度、锁幂等键、不自动重发**；
+  审核延迟后用 ``cli.app verify-pending`` 只读重试核验。
 * 点击后超时/断连/进程重启 → ``uncertain``，**冻结同目标后续动作，不自动重发**。
 * ``uncertain`` **占用额度**，不靠时间自动释放。
 * 模拟与真实**分开存储/计数**；模拟 ID **不得**当远端 ``rpid``。
@@ -231,7 +235,7 @@ class PublishGate:
         allowed_statuses = {"approved"}
         if interaction.mode == "auto":
             allowed_statuses.add("pending")
-        if status in ("reserved", "sent_verified"):
+        if status in ("reserved", "sent_verified", "sent_pending_verify"):
             return GateResult(False, REJECT_DUPLICATE, f"草稿已处理：{status}", checks)
         if status == "uncertain":
             return GateResult(False, REJECT_TARGET_FROZEN, "该草稿处于不确定态，已冻结", checks)
@@ -277,7 +281,7 @@ class PublishGate:
                     "冻结，不自动重发，需人工核对",
                     checks,
                 )
-            if existing_status in ("sent_verified", "failed"):
+            if existing_status in ("sent_verified", "sent_pending_verify", "failed"):
                 return GateResult(
                     False,
                     REJECT_DUPLICATE,
@@ -638,21 +642,98 @@ class PublishGate:
                 gates=gate.checks,
             )
 
+        # ★ #4：拿到 rpid 只证明"平台接受了请求"，**不等于**内容已核验。
+        #   先落 sent_pending_verify（保留 rpid，崩溃后可恢复），再读回核对。
         self.db.settle_action(
             action_id=action_id,
-            status="sent_verified",
+            status="sent_pending_verify",
             remote_rpid=remote_rpid,
             remote_url=remote_url,
+            error_code="READBACK_PENDING",
         )
-        self.db.set_draft_status(draft_id, "sent_verified")
+        self.db.set_draft_status(draft_id, "sent_pending_verify")
+
+        readback = await self._readback_after_publish(
+            bvid=bvid,
+            aid=aid,
+            action_type=action_type,
+            draft=draft,
+            remote_rpid=remote_rpid,
+            agent_mid=int(identity_mid or 0),
+        )
+        if readback is not None and readback.ok:
+            self.db.settle_action(
+                action_id=action_id,
+                status="sent_verified",
+                remote_rpid=remote_rpid,
+                remote_url=remote_url,
+            )
+            self.db.set_draft_status(draft_id, "sent_verified")
+            return PublishResult(
+                True,
+                "OK",
+                action_id=action_id,
+                remote_rpid=remote_rpid,
+                remote_url=remote_url,
+                gates=gate.checks,
+            )
+
+        reason = readback.reason if readback is not None else "READBACK_UNAVAILABLE"
+        self.db.settle_action(
+            action_id=action_id,
+            status="sent_pending_verify",
+            remote_rpid=remote_rpid,
+            remote_url=remote_url,
+            error_code=reason,
+        )
         return PublishResult(
             True,
-            "OK",
+            "OK_PENDING_VERIFY",
             action_id=action_id,
             remote_rpid=remote_rpid,
             remote_url=remote_url,
+            detail=(
+                f"已取得远端 rpid（{remote_rpid}），但内容核验未通过：{reason}。"
+                "已标记 sent_pending_verify（占额度、锁幂等键），不自动重发；"
+                "用 `cli.app verify-pending` 只读重试核验。"
+            ),
             gates=gate.checks,
         )
+
+    async def _readback_after_publish(
+        self,
+        *,
+        bvid: str,
+        aid: int,
+        action_type: str,
+        draft: Any,
+        remote_rpid: str,
+        agent_mid: int,
+    ) -> Any:
+        """发布后立即读回核对（只读一次，不重试）。失败不抛异常。"""
+        if self.reader is None or not hasattr(self.reader, "queue"):
+            return None
+        from core.verify import ReadbackResult, readback_comment
+
+        root = (
+            str(draft["target_root"] or draft["target_rpid"] or "")
+            if action_type == REPLY_ACTION
+            else ""
+        )
+        try:
+            return await readback_comment(
+                self.reader,
+                bvid=bvid,
+                aid=aid,
+                rpid=remote_rpid,
+                agent_mid=agent_mid,
+                expected_text=str(draft["text"]),
+                root=root,
+            )
+        except Exception as exc:  # noqa: BLE001 - 核验失败不该让发布结果崩掉
+            return ReadbackResult(
+                False, f"READBACK_ERROR:{type(exc).__name__}", bvid=bvid, rpid=remote_rpid
+            )
 
     async def publish_like(self, *, bvid: str) -> PublishResult:
         """点赞一个视频（**与发布受同一套门禁约束**）。

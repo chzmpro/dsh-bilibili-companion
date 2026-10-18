@@ -118,14 +118,14 @@ def test_migration_v3_to_v4_preserves_data(tmp_path: object) -> None:
     db2.close()
 
 
-def test_schema_version_is_13() -> None:
-    """v5 = 评论可见性复核账本（``verify_ledger``，P1 2026-10-16）。
+def test_schema_version_is_14() -> None:
+    """v14 = 发布读回核验状态（``sent_pending_verify``，#4 2026-10-18）。
 
     ⚠️ **迁移版本号只能追加，不能改已应用的版本**
     —— 把新表塞进已应用过的 v4，既有库不会重跑它（本项目踩过这个坑）。
     """
     from core import schema
 
-    assert schema.SCHEMA_VERSION == 13
+    assert schema.SCHEMA_VERSION == 14
     versions = [v for v, _ in schema.MIGRATIONS]
-    assert versions == list(range(1, 14)), "迁移版本必须连续"
+    assert versions == list(range(1, 15)), "迁移版本必须连续"
