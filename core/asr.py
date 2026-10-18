@@ -968,8 +968,13 @@ async def transcribe_async(
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+    except asyncio.CancelledError:
+        _terminate(proc)
+        await proc.communicate()
+        raise
     except TimeoutError:
         _terminate(proc)
+        await proc.communicate()
         return AsrResult(
             ok=False,
             text="",

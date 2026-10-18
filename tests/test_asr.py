@@ -111,7 +111,7 @@ class FakeProc:
         self.killed = False
 
     async def communicate(self) -> tuple[bytes, bytes]:
-        if self._delay:
+        if self._delay and not self.killed:
             await asyncio.sleep(self._delay)
         return self._stdout, self._stderr
 

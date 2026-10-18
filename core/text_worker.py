@@ -684,18 +684,18 @@ class TextWorker:
             prompt_version=PROMPT_VERSION,
         )
         if cached is not None:
-            self.db.record_text_job(
-                bvid=bvid,
-                input_sha256=digest,
-                model_id=model_id,
-                prompt_version=PROMPT_VERSION,
-                status="ok",
-                from_cache=True,
-            )
-            limitations.append("TEXT_WORKER_CACHE_HIT")
             # ★ 缓存命中就**不再调用模型**，也不重新计 token
             cached_result = _load_cached_result(cached)
             if cached_result is not None:
+                self.db.record_text_job(
+                    bvid=bvid,
+                    input_sha256=digest,
+                    model_id=model_id,
+                    prompt_version=PROMPT_VERSION,
+                    status="ok",
+                    from_cache=True,
+                )
+                limitations.append("TEXT_WORKER_CACHE_HIT")
                 return self._build_card(
                     bvid=bvid,
                     aid=aid,

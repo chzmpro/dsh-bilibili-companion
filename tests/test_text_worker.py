@@ -554,6 +554,12 @@ async def test_cache_tracks_model_prompt_context(
     else:
         assert "TEXT_WORKER_CACHE_HIT" not in second.limitations
         assert second.relevance_score == 90
+    third = await worker.analyze(**args)
+    assert "TEXT_WORKER_CACHE_HIT" in third.limitations
+    assert third.relevance_score == second.relevance_score
+    totals = db.text_job_totals()
+    assert totals["prompt_tokens"] == (120 if change == "none" else 240)
+    assert totals["completion_tokens"] == (40 if change == "none" else 80)
     await worker.aclose()
 
 

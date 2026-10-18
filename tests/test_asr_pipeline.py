@@ -8,7 +8,7 @@
 * ★ **转写返回空 = 没有语音** → 记 ``ASR_NO_SPEECH``，**仍降级**、**不重试**；
 * 缺依赖 / 失败 / 异常 → 只加一条 limitation，**绝不让读取崩**。
 
-**绝不真跑模型**：全部 monkeypatch ``core.asr.transcribe_target``。
+**绝不真跑模型**：全部 monkeypatch ``core.asr.transcribe_async``。
 """
 
 from __future__ import annotations
@@ -63,10 +63,10 @@ def make_pipeline(db: Database, *, asr_fallback: bool) -> Pipeline:
 
 
 def _install_fake_asr(monkeypatch, result: AsrResult | Exception) -> list[str]:
-    """把 ``core.asr.transcribe_target`` 换成假的；返回调用记录。"""
+    """把 ``core.asr.transcribe_async`` 换成假的；返回调用记录。"""
     calls: list[str] = []
 
-    def fake(target: str, *, model: str = "small", lang: str = "zh") -> AsrResult:
+    async def fake(target: str, *, model: str = "small", lang: str = "zh") -> AsrResult:
         calls.append(target)
         if isinstance(result, Exception):
             raise result
@@ -74,7 +74,7 @@ def _install_fake_asr(monkeypatch, result: AsrResult | Exception) -> list[str]:
 
     import core.asr
 
-    monkeypatch.setattr(core.asr, "transcribe_target", fake)
+    monkeypatch.setattr(core.asr, "transcribe_async", fake)
     return calls
 
 

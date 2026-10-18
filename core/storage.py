@@ -822,6 +822,12 @@ class Database:
             )
             if existing is not None:
                 job_id = str(existing["job_id"])
+                if from_cache:
+                    # 缓存读取不是新模型调用，不清空结果或冲掉历史 token 账。
+                    self.execute(
+                        "UPDATE text_jobs SET from_cache = 1 WHERE job_id = ?", (job_id,)
+                    )
+                    return job_id
                 self.execute(
                     """
                     UPDATE text_jobs

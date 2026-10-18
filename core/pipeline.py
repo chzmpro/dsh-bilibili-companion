@@ -386,14 +386,14 @@ class Pipeline:
         有用户因此**烧掉 27 次工具调用**，最后报告是空的。
         """
         try:
-            from core.asr import transcribe_target
+            from core.asr import transcribe_async
         except ImportError:
             return "", "ASR_MODULE_MISSING"
 
         model = str(getattr(self.config.text_worker, "asr_model", "") or "")
         try:
-            # ★ ASR 是**同步阻塞**的重活（CPU 转写），扔到线程里别堵事件循环
-            result = await asyncio.to_thread(transcribe_target, bvid, model=model)
+            # 复用已有子进程入口：批次取消时能停止转写，不遗留后台线程。
+            result = await transcribe_async(bvid, model=model)
         except Exception as exc:  # noqa: BLE001 —— 兜底能力失败不该让整条读取崩
             return "", f"ASR_ERROR_{type(exc).__name__}"
 
