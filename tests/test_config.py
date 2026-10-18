@@ -17,6 +17,26 @@ from core.config import (
 from tests.conftest import make_config
 
 
+@pytest.fixture(autouse=True)
+def audit_upstream_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """审计规则使用可控输入，不读取作者机器上的另一个项目。"""
+    from core import audit
+
+    persona = tmp_path / "curator" / "docs" / "persona.md"
+    persona.parent.mkdir(parents=True)
+    persona.write_text('评论 ≤5/天\n点赞 ≤30/天\n不提「我是 AI」\n', encoding="utf-8")
+    (persona.parent.parent / "config.toml").write_text(
+        "max_likes_per_day = 8\n", encoding="utf-8"
+    )
+    brief = tmp_path / "brief.md"
+    brief.write_text(
+        "max_top_comments_per_day: 1\n可适度表明 AI 身份\n最多返回 3 个短候选包\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(audit, "PERSONA_DOC", persona)
+    monkeypatch.setattr(audit, "BRIEF_DOC", brief)
+
+
 def test_default_config_is_readonly_and_safe() -> None:
     """默认必须是 observe + dry_run + 关闭发布 + 无 UID。"""
     config = Config()

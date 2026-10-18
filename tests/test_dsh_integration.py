@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 import yaml
@@ -131,12 +131,14 @@ def test_preset_declares_the_restriction_plugin(fragment: list[dict]) -> None:
     )
 
 
-def test_restriction_plugin_path_exists(fragment: list[dict]) -> None:
+def test_restriction_plugin_template_points_to_bundled_plugin(fragment: list[dict]) -> None:
+    """模板是安装示例，不要求测试机也有作者的 D 盘目录。"""
     plugins = find_row(fragment, "preset-bili-companion")["config"]["plugins"]
     row = next(p for p in plugins if "restrict-bili-agent-tools" in p.get("name", ""))
-    path = Path(row["name"])
+    path = PureWindowsPath(row["name"])
     assert path.is_absolute(), "相对路径会锚定到 profile 目录，必须写绝对路径"
-    assert path.exists(), f"插件文件不存在：{path}"
+    assert path.parts[-2:] == ("dsh", "restrict-bili-agent-tools.mjs")
+    assert RESTRICT_PLUGIN.is_file(), "模板引用的插件必须随仓库提供"
 
 
 def test_preset_plugin_rows_are_wellformed(fragment: list[dict]) -> None:
