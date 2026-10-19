@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-companion",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "B站小号（小鲸鱼）：刷一轮 B站、读字幕挑出值得的、写日报、值得的 @ 主人。内核是本仓库自研的 Python MCP bridge（core/ + bridge/），本包含 Host 半身与浏览器设置页。",

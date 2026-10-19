@@ -139,6 +139,8 @@ function editableSchema() {
       type: spec.type,
       note: spec.note || '',
       options: spec.options || null,
+      // ★ 只翻译**显示**，写回 config.yaml 的值仍是英文枚举（options 不变）
+      optionLabels: spec.optionLabels || null,
     }
   }
   return out

@@ -345,7 +345,14 @@ window.__ModuleLoader__.load({
               value: String(value ?? ''),
               onChange: (e) => onCommit(path, e.target.value),
             },
-            (spec.options || []).map((opt) => h('option', { key: opt, value: opt }, opt)),
+            (spec.options || []).map((opt) =>
+              h(
+                'option',
+                { key: opt, value: opt },
+                // 显示中文；写回去的仍是 value（英文枚举）
+                spec.optionLabels?.[opt] ? `${spec.optionLabels[opt]}` : opt,
+              ),
+            ),
           ),
         )
       }

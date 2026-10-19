@@ -273,6 +273,18 @@ const choiceNoOptions = Object.entries(schema).filter(
 )
 ok(choiceNoOptions.length === 0, `choice 字段都带 options（缺 ${choiceNoOptions.length} 项）`)
 
+// ★ 选项必须带**中文显示名**（主人 2026-10-18：下拉框里不能是英文枚举）
+const choiceNoLabels = Object.entries(schema).filter(
+  ([, s]) =>
+    s?.type === 'choice' &&
+    Array.isArray(s.options) &&
+    s.options.some((opt) => !s.optionLabels?.[opt]),
+)
+ok(
+  choiceNoLabels.length === 0,
+  `choice 的每个选项都有中文显示名（缺 ${choiceNoLabels.length} 项）`,
+)
+
 // ★★ 红线：授权字段**绝不在** schema 里（界面上点一下就打开发布 = 绕过人审）
 const FORBIDDEN_IN_SCHEMA = [
   'interaction.mode',

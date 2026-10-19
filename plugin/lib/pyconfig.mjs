@@ -62,6 +62,12 @@ export const EDITABLE_KEYS = Object.freeze({
   'schedule.mode': {
     type: 'choice',
     options: ['on_host_start', 'daily', 'continuous'],
+    // ★ 界面显示中文，写回 `config.yaml` 的仍是英文枚举值（值不能翻译）。
+    optionLabels: {
+      on_host_start: '打开 DSH 时跑一轮',
+      daily: '每天固定时刻',
+      continuous: '持续跑（每隔 N 分钟）',
+    },
     note: '唤醒方式：打开 DSH / 每日固定时刻 / 持续跑',
   },
   'schedule.daily_time': { type: 'str', note: '每日时刻（仅 daily 模式）' },
@@ -75,6 +81,11 @@ export const EDITABLE_KEYS = Object.freeze({
   'interaction.frequency_tier': {
     type: 'choice',
     options: ['conservative', 'normal', 'active'],
+    optionLabels: {
+      conservative: '保守',
+      normal: '正常',
+      active: '积极',
+    },
     note: '频率档位',
   },
   'interaction.max_top_comments_per_day': { type: 'int', note: '每天最多几条评论' },
@@ -109,6 +120,11 @@ export const EDITABLE_KEYS = Object.freeze({
   'persona.ai_identity': {
     type: 'choice',
     options: ['never', 'when_asked', 'proactive'],
+    optionLabels: {
+      never: '不提 AI 身份',
+      when_asked: '被问到才说明',
+      proactive: '主动说明',
+    },
     note: 'AI 身份怎么提',
   },
   'persona.nicknames': { type: 'inline-list', note: '小名（逗号分隔）' },
