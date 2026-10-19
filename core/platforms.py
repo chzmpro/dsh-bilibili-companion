@@ -1,38 +1,9 @@
-"""平台抽象层：一个统一的"视频平台"接口，为多平台预留框架（2026-10-17）。
+"""统一平台接口与显式能力声明。
 
-## 为什么现在就要做（虽然只有 B 站实现了）
-
-主人说：*"抖音和小红书……走正规渠道，但是这两个你先预留框架，
-待 B 站基本完成后再对它们进行完善"*。
-
-把接口先定下来，好处是**将来接新平台只是加一个 adapter**，
-而不用回头改 pipeline / 门禁 / 日报那一整条链。
-
-## ★★ 三条设计红线（这是本模块存在的意义）
-
-1. **没实现的能力必须"明确拒绝"，绝不"假装能用"**
-   抖音/小红书 adapter 的所有方法都抛 :class:`CapabilityNotImplemented`，
-   里面写清**为什么没做**（走正规渠道 / 待 B 站完成）。
-   绝不允许返回空列表假装成功 —— 那会让上层"以为读到了，只是没内容"。
-
-2. **平台能力差异要显式声明**（:class:`PlatformCapabilities`）
-   比如小红书没有"字幕"概念、抖音的评论接口要授权。
-   上层据此决定降级策略，而不是猜。
-
-3. **不提供"绕过风控"的入口**
-   抽象层里**没有**任何签名伪造 / 指纹伪造 / 代理轮换的位置。
-   接新平台只能通过**该平台的官方授权通道**。
-
-## 用法
-
-```python
-adapter = get_adapter("bilibili", reader=reader)
-if adapter.capabilities().subtitles:
-    metas = await adapter.list_subtitles(bvid)
-```
-
-:func:`get_adapter` 对未注册平台**抛错**（不是返回 None）——
-让"用错了平台"立刻暴露。
+B 站复用现有 reader；小红书与抖音可注入用户配置的外部只读 MCP
+adapter（见 core.external_platforms）。未配置时仍返回明确拒绝的占位
+adapter，不把不可用后端伪装成空搜索结果。本项目不实现外部平台签名、
+验证码、指纹或 IP 绕过逻辑。外部 adapter 的公开写入能力始终关闭。
 """
 
 from __future__ import annotations
@@ -224,6 +195,7 @@ class BilibiliAdapter:
             {
                 "platform": self.platform_id,
                 "native_id": meta.bvid,
+                "aid": meta.aid,
                 "title": meta.title,
                 "author": meta.up_name,
                 "author_id": meta.up_mid,
@@ -292,9 +264,7 @@ class _UnimplementedAdapter:
     reason: str
     planned_access_mode: str = "official_api"
     capabilities_declared: PlatformCapabilities = field(
-        default_factory=lambda: PlatformCapabilities(
-            access_mode="none", note="尚未接入"
-        )
+        default_factory=lambda: PlatformCapabilities(access_mode="none", note="尚未接入")
     )
 
     def capabilities(self) -> PlatformCapabilities:
@@ -305,7 +275,7 @@ class _UnimplementedAdapter:
             "NOT_IMPLEMENTED",
             f"{self.platform_id} 的「{what}」还没接。原因：{self.reason}。"
             f"规划中的接入方式：{self.planned_access_mode}"
-            "（**只走平台官方授权通道**，不做签名逆向、不刷推荐流）。",
+            "。请配置独立部署的只读 MCP 后端；平台官方授权通道也可另行接入。",
         )
 
     # ⚠️ 下面的参数**故意不用** —— 占位 adapter 的职责就是"明确拒绝"，
@@ -337,40 +307,34 @@ class _UnimplementedAdapter:
 def _douyin_placeholder() -> _UnimplementedAdapter:
     return _UnimplementedAdapter(
         platform_id=PLATFORM_DOUYIN,
-        reason=(
-            "待 B 站基本完成后接入。抖音的 web 接口需要**三件套签名**"
-            "（a_bogus + timestamp + x-secsdk-web-signature，"
-            "其中 secsdk 是 177KB 混淆运行时），"
-            "**逆向签名属于绕过平台技术保护措施**，本项目不做"
-        ),
-        planned_access_mode="official_api",
+        reason="尚未启用独立部署的抖音只读 MCP 后端；本项目不实现签名逆向或风控绕过",
+        planned_access_mode="external_mcp_readonly",
     )
 
 
 def _xiaohongshu_placeholder() -> _UnimplementedAdapter:
     return _UnimplementedAdapter(
         platform_id=PLATFORM_XIAOHONGSHU,
-        reason=(
-            "待 B 站基本完成后接入。小红书没有公开的只读 API，"
-            "且已有生效判决认定「绕开技术保护措施抓取」违法"
-            "（常州天宁法院刑事案、上海知产法院判赔 110 万），"
-            "**本项目只走官方授权通道**"
-        ),
-        planned_access_mode="official_api",
+        reason="尚未启用独立部署的小红书只读 MCP 后端；请配置后端地址及账户标识",
+        planned_access_mode="external_mcp_readonly",
     )
 
 
-def get_adapter(platform: str, *, reader: Any = None) -> Any:
+def get_adapter(platform: str, *, reader: Any = None, backend: Any = None) -> Any:
     """按平台 id 取 adapter。
 
     * ``bilibili`` —— 需要传 ``reader``；
-    * ``douyin`` / ``xiaohongshu`` —— 返回**占位 adapter**（调用即明确拒绝）；
+    * ``douyin`` / ``xiaohongshu`` —— 使用传入的 backend adapter，未传则明确拒绝；
     * 其他 —— 抛 :class:`UnsupportedPlatform`。
 
     ★ 不认识就**抛错**（不是返回 None）：让"平台名写错"立刻暴露，
     而不是走到后面才发现"怎么什么都没读到"。
     """
     key = platform.strip().lower()
+    if backend is not None and key in {PLATFORM_DOUYIN, PLATFORM_XIAOHONGSHU}:
+        if backend.platform_id != key:
+            raise PlatformError("PLATFORM_MISMATCH", "外部 adapter 与请求的平台不一致。")
+        return backend
     if key == PLATFORM_BILIBILI:
         if reader is None:
             raise PlatformError(
@@ -388,10 +352,21 @@ def get_adapter(platform: str, *, reader: Any = None) -> Any:
     )
 
 
-def platform_overview() -> list[dict[str, Any]]:
+def platform_overview(adapters: dict[str, PlatformAdapter] | None = None) -> list[dict[str, Any]]:
     """所有平台的现状一览（给 ``companion_status`` / CLI 用）。"""
     out: list[dict[str, Any]] = []
     for key in KNOWN_PLATFORMS:
+        if adapters and key in adapters:
+            caps = adapters[key].capabilities()
+            out.append(
+                {
+                    "platform": key,
+                    "implemented": True,
+                    "access_mode": caps.access_mode,
+                    "capabilities": caps.to_dict(),
+                }
+            )
+            continue
         if key == PLATFORM_BILIBILI:
             out.append(
                 {

@@ -70,6 +70,19 @@ class DeliverResult:
     session_id: str = ""
     error_code: str = ""
     message: str = ""
+    #: 仅已证明没有进入 followup 的失败可安全重试；缺少证据默认为不确定。
+    retry_safe: bool = False
+
+    def __post_init__(self) -> None:
+        if self.error_code in {
+            "DSH_NOT_FOUND",
+            "EMPTY",
+            "HTTP_400",
+            "HTTP_403",
+            "HTTP_404",
+            "HTTP_503",
+        }:
+            self.retry_safe = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +91,7 @@ class DeliverResult:
             "session_id": self.session_id,
             "error_code": self.error_code,
             "message": self.message,
+            "retry_safe": self.retry_safe,
         }
 
 
@@ -256,6 +270,9 @@ def deliver(text: str, *, session_id: str = "", timeout: float = 15) -> DeliverR
             ok=False,
             error_code="NETWORK",
             message=f"投递请求失败：{type(exc).__name__}",
+            retry_safe=isinstance(
+                exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+            ),
         )
 
     try:

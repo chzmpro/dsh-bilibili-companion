@@ -118,7 +118,7 @@ def test_migration_v3_to_v4_preserves_data(tmp_path: object) -> None:
     db2.close()
 
 
-def test_schema_version_is_16() -> None:
+def test_schema_versions_are_contiguous_and_include_keyword_adoptions() -> None:
     """v16 = 关键词采纳账本（C 项自动回填的护栏与审计，2026-10-19）。
 
     ⚠️ **迁移版本号只能追加，不能改已应用的版本**
@@ -128,8 +128,8 @@ def test_schema_version_is_16() -> None:
     """
     from core import schema
 
-    assert schema.SCHEMA_VERSION == 16
+    assert schema.SCHEMA_VERSION >= 16
     versions = [v for v, _ in schema.MIGRATIONS]
-    assert versions == list(range(1, 17)), "迁移版本必须连续"
+    assert versions == list(range(1, schema.SCHEMA_VERSION + 1)), "迁移版本必须连续"
     # ★ 顺序必须严格递增（把 v16 插到 v6 后面就违反这条，且后果是静默跳表）
     assert versions == sorted(versions)

@@ -19,6 +19,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.external_config import ExternalPlatformsConfig
+from core.ocr import OcrConfig
+
 InteractionMode = Literal["observe", "review", "auto"]
 
 # ---- 硬上限（任务书 §4 明令）------------------------------------------------
@@ -43,6 +46,9 @@ class AccountConfig(_Base):
 
 
 class DiscoveryConfig(_Base):
+    platforms: list[Literal["bilibili", "douyin", "xiaohongshu"]] = Field(
+        default=["bilibili"], min_length=1, max_length=3
+    )
     keywords: list[str] = Field(default_factory=list, min_length=1)
     published_within_days: int = Field(default=7, ge=1, le=90)
     max_candidates_per_run: int = Field(default=12, ge=1, le=100)
@@ -410,6 +416,8 @@ class ReportConfig(_Base):
 
 
 class Config(_Base):
+    external_platforms: ExternalPlatformsConfig = Field(default_factory=ExternalPlatformsConfig)
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
     account: AccountConfig = Field(default_factory=AccountConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     bilibili_requests: BilibiliRequestsConfig = Field(default_factory=BilibiliRequestsConfig)

@@ -260,6 +260,7 @@ class Database:
         start_sec: float | None = None,
         end_sec: float | None = None,
         availability: str = "available",
+        page_index: int | None = None,
     ) -> str:
         """登记一段**真实读到的原文**并返回 ``evidence_id``。
 
@@ -267,15 +268,20 @@ class Database:
         避免重复读取同一片段时产生重复证据。
         """
         text_hash = _sha256(text)
-        existing = self.query_one(
-            """
-            SELECT evidence_id FROM evidence
-             WHERE bvid = ? AND source_type = ? AND text_sha256 = ?
-               AND COALESCE(start_sec, -1) = COALESCE(?, -1)
-             LIMIT 1
-            """,
-            (bvid, source_type, text_hash, start_sec),
-        )
+        if page_index is None:
+            existing = self.query_one(
+                "SELECT evidence_id FROM evidence WHERE bvid=? AND source_type=? "
+                "AND text_sha256=? AND source_url=? "
+                "AND COALESCE(start_sec,-1)=COALESCE(?,-1) LIMIT 1",
+                (bvid, source_type, text_hash, source_url, start_sec),
+            )
+        else:
+            existing = self.query_one(
+                "SELECT e.evidence_id FROM evidence e JOIN evidence_pages p "
+                "ON p.evidence_id=e.evidence_id WHERE bvid=? AND source_type=? "
+                "AND text_sha256=? AND source_url=? AND p.page_index=? LIMIT 1",
+                (bvid, source_type, text_hash, source_url, page_index),
+            )
         if existing is not None:
             return str(existing["evidence_id"])
 
@@ -303,6 +309,9 @@ class Database:
                 availability,
             ),
         )
+        if page_index is not None:
+            self.execute("INSERT INTO evidence_pages(evidence_id,page_index) VALUES (?,?)",
+                         (evidence_id, page_index))
         return evidence_id
 
     def get_evidence(self, evidence_id: str) -> sqlite3.Row | None:
@@ -336,7 +345,7 @@ class Database:
             return None
         text = str(row["text"])
         clipped = len(text) > max_chars
-        return {
+        result = {
             "evidence_id": evidence_id,
             "bvid": row["bvid"],
             "source_type": row["source_type"],
@@ -348,6 +357,11 @@ class Database:
             "truncated": clipped,
             "fetched_at": row["fetched_at"],
         }
+        page = self.query_one("SELECT page_index FROM evidence_pages WHERE evidence_id=?",
+                              (evidence_id,))
+        if page:
+            result["page_index"] = page["page_index"]
+        return result
 
     # ---- drafts ------------------------------------------------------------
 
@@ -770,32 +784,88 @@ class Database:
         return int(row["n"]) if row is not None else 0
 
     def last_started_run_at(self) -> int | None:
-        """最近一次**开始**的时刻（**含未完成/崩溃**的轮次）。
+        """最近一次尝试的时刻（含未完成、崩溃、同一包的恢复投递）。
 
         与 :meth:`last_finished_run_at` 分工不同：这里用于**最小间隔**，
         挡住"官方不保证恰好投递一次"造成的并发窗口——
         第一次运行还没结束时第二次唤醒不该再跑。
         """
         row = self.query_one(
-            "SELECT started_at FROM runs ORDER BY started_at DESC LIMIT 1"
+            "SELECT MAX(attempt_at) AS started_at FROM ("
+            "SELECT MAX(started_at) AS attempt_at FROM runs UNION ALL "
+            "SELECT MAX(last_attempt_at) AS attempt_at FROM cycle_outbox)"
         )
         if row is None or row["started_at"] is None:
             return None
         return int(row["started_at"])
 
     def last_finished_run_at(self) -> int | None:
-        """最近一次**已结束**的运行的开始时刻（Unix 秒）。
+        """最近一次成功完成的运行的开始时刻（Unix 秒）。
 
         用于 :func:`core.schedule.is_due` 判断"今天跑过没有"。
         取 ``started_at`` 而非 ``finished_at``：跨零点运行时应算作"那天跑的"。
         """
         row = self.query_one(
             "SELECT started_at FROM runs WHERE finished_at IS NOT NULL "
+            "AND conclusion IN ('ok','no_candidates','no_content') "
             "ORDER BY started_at DESC LIMIT 1"
         )
         if row is None or row["started_at"] is None:
             return None
         return int(row["started_at"])
+
+    def pending_cycle_delivery(self) -> sqlite3.Row | None:
+        """未解决的包优先恢复；不确定接收、耗尽重试仍保留，禁止另起重复学习。"""
+        return self.query_one(
+            "SELECT * FROM cycle_outbox WHERE state NOT IN ('completed','empty') "
+            "ORDER BY created_at, rowid LIMIT 1"
+        )
+
+    def save_cycle_delivery(self, run_id: str, *, session_id: str, payload: dict[str, Any]) -> None:
+        self.execute(
+            "INSERT INTO cycle_outbox "
+            "(run_id, session_id, payload_json, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (run_id, session_id, json.dumps(payload, ensure_ascii=False), now_ts(), now_ts()),
+        )
+
+    def checkpoint_cycle_candidate(self, run_id: str, card_payload: dict[str, Any]) -> None:
+        """完成的模型结果与已读标记一起提交，批次被杀后仍能恢复，不重新分析。"""
+        with self.transaction() as tx:
+            row = tx.execute(
+                "SELECT payload_json FROM cycle_outbox WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("cycle outbox missing before candidate checkpoint")
+            payload = json.loads(row["payload_json"])
+            cards = payload.setdefault("read_cards", [])
+            cards[:] = [card for card in cards if card["bvid"] != card_payload["bvid"]]
+            cards.append(card_payload)
+            tx.execute(
+                "UPDATE cycle_outbox SET payload_json=?, updated_at=? WHERE run_id=?",
+                (json.dumps(payload, ensure_ascii=False), now_ts(), run_id),
+            )
+            tx.execute(
+                "UPDATE videos SET status='read', last_seen_at=? WHERE bvid=?",
+                (now_ts(), card_payload["bvid"]),
+            )
+
+    def update_cycle_delivery(self, run_id: str, **values: Any) -> None:
+        allowed = {
+            "state",
+            "session_id",
+            "payload_json",
+            "prompt",
+            "attempts",
+            "last_attempt_at",
+            "next_attempt_at",
+        }
+        if not values or not set(values) <= allowed:
+            raise ValueError("invalid cycle outbox update")
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        self.execute(
+            f"UPDATE cycle_outbox SET {assignments}, updated_at = ? WHERE run_id = ?",
+            (*values.values(), now_ts(), run_id),
+        )
 
     # ---- text_jobs ---------------------------------------------------------
 

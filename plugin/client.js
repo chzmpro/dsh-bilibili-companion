@@ -133,6 +133,7 @@ window.__ModuleLoader__.load({
         subtitle: '搜索与筛选',
         defaultOpen: true,
         paths: [
+          'discovery.platforms',
           'discovery.published_within_days',
           'discovery.max_candidates_per_run',
           'discovery.max_full_reads_per_run',
@@ -197,6 +198,18 @@ window.__ModuleLoader__.load({
           'text_worker.max_excerpt_chars',
           'text_worker.asr_fallback',
           'text_worker.asr_model',
+        ],
+      },
+      {
+        title: '图片文字识别',
+        subtitle: '本地OCR，不调用视觉模型；Tesseract路径由本人配置',
+        defaultOpen: false,
+        paths: [
+          'ocr.enabled',
+          'ocr.languages',
+          'ocr.max_images',
+          'ocr.timeout_seconds',
+          'ocr.max_image_bytes',
         ],
       },
       {

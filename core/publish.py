@@ -229,6 +229,10 @@ class PublishGate:
         draft = self.db.get_draft(draft_id)
         if draft is None:
             return GateResult(False, REJECT_DRAFT_NOT_FOUND, f"草稿不存在：{draft_id}")
+        from core.content import is_external
+
+        if is_external(self.db, str(draft["bvid"])):
+            return GateResult(False, "REJECT_PLATFORM_READ_ONLY", "外部平台本轮仅可读取")
 
         status = str(draft["status"])
         checks["draft_status"] = status
@@ -525,6 +529,10 @@ class PublishGate:
         draft = self.db.get_draft(draft_id)
         if draft is None:
             return PublishResult(False, REJECT_DRAFT_NOT_FOUND)
+        from core.content import is_external
+
+        if is_external(self.db, str(draft["bvid"])):
+            return PublishResult(False, "REJECT_PLATFORM_READ_ONLY")
 
         identity_mid, verified = await self.read_identity()
 
@@ -743,6 +751,10 @@ class PublishGate:
 
         ``like_state`` 已是 1 → 直接 ``ALREADY_LIKED``，不重复提交。
         """
+        from core.content import is_external
+
+        if is_external(self.db, bvid):
+            return PublishResult(False, "REJECT_PLATFORM_READ_ONLY")
         config = self.config
         checks: dict[str, Any] = {}
 
@@ -835,6 +847,10 @@ class PublishGate:
         ``folder_name`` 用于日志与状态；``media_id`` 是提交给 B站 的 mlid
         （由 :meth:`resolve_favorite_folder` 从名字解析）。
         """
+        from core.content import is_external
+
+        if is_external(self.db, bvid):
+            return PublishResult(False, "REJECT_PLATFORM_READ_ONLY")
         config = self.config
         checks: dict[str, Any] = {"folder": folder_name, "media_id": media_id}
 

@@ -69,7 +69,7 @@ def _pyconfig_keys() -> tuple[set[str], set[str]]:
         re.findall(r"'([a-z_]+\.[a-z_]+)'\s*:", editable_block.group(1) if editable_block else "")
     )
     never = set(
-        re.findall(r"'([a-z_]+\.[a-z_]+)'", never_block.group(1) if never_block else "")
+        re.findall(r"'([a-z_]+(?:\.[a-z_]+)+)'", never_block.group(1) if never_block else "")
     )
     return editable, never
 
@@ -133,9 +133,10 @@ def test_identity_fields_not_editable() -> None:
 
 
 def test_settings_coverage_is_reasonable() -> None:
-    """★ 覆盖度要有下限 —— 防止以后又退回"只开放少数几项"。"""
+    """普通偏好覆盖度不退步；部署命令与凭据引用不属于偏好控件。"""
     editable, _ = _pyconfig_keys()
-    leaves = _config_leaves()
+    leaves = {key for key in _config_leaves()
+              if not key.startswith("external_platforms.") and key != "ocr.command"}
     ratio = len(editable) / len(leaves)
     assert ratio >= 0.8, (
         f"设置页只开放了 {len(editable)}/{len(leaves)} = {ratio:.0%}，"

@@ -29,6 +29,8 @@ from datetime import datetime
 from typing import Any
 
 from core import health
+from core.config import load_config
+from core.paths import default_config_path
 from core.schedule import evaluate_due, resolve_tz
 
 #: 默认：DSH 启动后多久才跑第一轮（给插件/会话加载留时间）。
@@ -103,12 +105,13 @@ class CycleScheduler:
         row = self.db.query_one(
             "SELECT run_id FROM runs "
             "WHERE finished_at IS NULL AND started_at >= ? "
+            "AND run_id NOT IN (SELECT run_id FROM cycle_outbox WHERE next_attempt_at <= ?) "
             "ORDER BY started_at DESC LIMIT 1",
-            (int(current - STALE_RUN_SECONDS),),
+            (int(current - STALE_RUN_SECONDS), int(current)),
         )
         return str(row["run_id"]) if row is not None else ""
 
-    def _due(self, *, now: datetime | None = None) -> Any:
+    def _due(self, *, now: datetime | None = None, recovering: bool = False) -> Any:
         schedule = self.config.schedule
         tz = resolve_tz(schedule.timezone)
 
@@ -120,13 +123,16 @@ class CycleScheduler:
             daily_time=schedule.daily_time,
             tz_name=schedule.timezone,
             now=now,
-            last_completed_at=_aware(self.db.last_finished_run_at()),
-            last_attempt_at=_aware(self.db.last_started_run_at()),
+            # Recovery is the same learning run. Its lease/retry budget is
+            # checked separately; a previous successful run or today's new-run
+            # quota must not strand a material package already in the outbox.
+            last_completed_at=None if recovering else _aware(self.db.last_finished_run_at()),
+            last_attempt_at=None if recovering else _aware(self.db.last_started_run_at()),
             min_gap_minutes=int(schedule.min_gap_minutes),
             peak_valley=bool(schedule.peak_valley),
             interval_minutes=int(schedule.interval_minutes),
             max_runs_per_day=int(schedule.max_runs_per_day),
-            runs_today=self.db.runs_today(),
+            runs_today=0 if recovering else self.db.runs_today(),
         )
 
     def _note_skip(self, reason: str, *, key: str = "") -> dict[str, Any]:
@@ -140,9 +146,7 @@ class CycleScheduler:
         字段，若拿完整文本去重会永远"不重复" ⇒ 每个 tick 都刷一条。
         """
         dedup = key or reason
-        self._reason_repeats = (
-            self._reason_repeats + 1 if dedup == self._last_reason else 1
-        )
+        self._reason_repeats = self._reason_repeats + 1 if dedup == self._last_reason else 1
         first = self._reason_repeats == 1
         if first or self._reason_repeats % 10 == 0:
             self._emit("scheduled", f"不跑：{reason}（第 {self._reason_repeats} 次）")
@@ -153,6 +157,13 @@ class CycleScheduler:
         """检查一次；到期就跑一轮。返回结果（给日志/面板看）。"""
         if self._stop:
             return {"ran": False, "reason": "stopped"}
+        # Settings are saved to disk while dm-watch keeps running. Refresh the
+        # effective config before every gate, including pause and peak/valley.
+        try:
+            if default_config_path().exists():
+                self.config = load_config()
+        except Exception as exc:
+            return self._note_skip(f"CONFIG_ERROR:{type(exc).__name__}")
         if bool(getattr(self.config.interaction, "pause", False)):
             return self._note_skip("PAUSED（暂停中，恢复要人工做）")
         state = str(self.db.health_state())
@@ -162,7 +173,29 @@ class CycleScheduler:
         if unfinished:
             return self._note_skip(f"UNFINISHED_RUN:{unfinished}（上一轮还没结束）")
 
-        check = self._due(now=now)
+        pending = self.db.pending_cycle_delivery()
+        current = now.timestamp() if now is not None else time.time()
+        if pending is not None:
+            if pending["state"] in {"exhausted", "dsh_error"}:
+                return self._note_skip(f"RECOVERY_REQUIRES_REVIEW:{pending['run_id']}")
+            if int(pending["next_attempt_at"]) > current:
+                return self._note_skip(f"RECOVERY_BACKOFF:{pending['run_id']}")
+        else:
+            # A failed attempt without an outbox (e.g. prepare_batch crashed)
+            # must not become a tight loop when min_gap_minutes is set to zero.
+            latest = self.db.query_one(
+                "SELECT started_at, finished_at, conclusion FROM runs "
+                "ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            )
+            if (
+                latest is not None
+                and latest["finished_at"] is not None
+                and latest["conclusion"] not in {"ok", "no_candidates", "no_content"}
+                and current - max(latest["started_at"], latest["finished_at"]) < 300
+            ):
+                return self._note_skip("FAILED_ATTEMPT_BACKOFF（失败后至少等待 5 分钟）")
+
+        check = self._due(now=now, recovering=pending is not None)
         if not check.due:
             return self._note_skip(
                 f"{check.reason}｜下次 {check.next_run_at}",

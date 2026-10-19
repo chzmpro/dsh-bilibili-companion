@@ -293,10 +293,14 @@ class CandidateCard:
     visual_reviewed: bool = False
     limitations: list[str] = field(default_factory=list)
     dropped_points: int = 0
+    platform: str = "bilibili"
+    native_id: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "bvid": self.bvid,
+            "platform": self.platform,
+            "native_id": self.native_id or self.bvid,
             "aid": self.aid,
             "title": self.title,
             "source_url": self.source_url,
