@@ -93,7 +93,10 @@ window.__ModuleLoader__.load({
 [data-bc-sub]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);font-weight:400;}
 [data-bc-field]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 [data-bc-fieldlabel]{font-size:12px;flex:1;min-width:0;}
+[data-bc-fieldmain]{font-size:13px;font-weight:500;line-height:18px;color:inherit;}
 [data-bc-fieldnote]{font-size:10px;line-height:14px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bc-path]{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  opacity:.72;}
 [data-bc-select]{padding:6px 8px;border-radius:8px;font-size:12px;font-family:inherit;
   border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:inherit;}
@@ -286,17 +289,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 字段的**中文主标题**（主人 2026-10-18 要求：中文为主，英文代码是小字）。
+     *
+     * 白名单里 `note` 本来就是中文说明；取它第一个「：/（/，」之前的部分
+     * 作为短标题（如「唤醒方式：打开 DSH / …」→「唤醒方式」）。
+     */
+    function fieldLabel(spec, path) {
+      const explicit = String(spec?.label || '').trim()
+      if (explicit) return explicit
+      const note = String(spec?.note || '').trim()
+      if (!note) return path
+      const short = note.split(/[：:（(，,]/)[0].trim()
+      return short || note
+    }
+
+    /**
      * 通用字段编辑器（按白名单里的 `type` 渲染对应控件）。
      *
      * 值走**本地草稿**（`draft`/`setDraft`），不直接绑服务端值 ——
      * 否则 5 秒轮询会把用户正在输入的字冲掉（AGENTS.md D3）。
      */
     function Field({ spec, path, value, onDraft, onCommit }) {
+      const note = String(spec?.note || '').trim()
+      const primary = fieldLabel(spec, path)
       const label = h(
         'div',
         { 'data-bc-fieldlabel': '' },
-        h('div', null, path),
-        spec.note ? h('div', { 'data-bc-fieldnote': '' }, spec.note) : null,
+        h('div', { 'data-bc-fieldmain': '' }, primary),
+        h(
+          'div',
+          { 'data-bc-fieldnote': '' },
+          note && note !== primary ? `${note} · ` : '',
+          h('code', { 'data-bc-path': '' }, path),
+        ),
       )
 
       if (spec.type === 'bool') {
