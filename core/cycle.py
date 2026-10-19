@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,8 @@ DEFAULT_POLL_SECONDS = 10
 
 #: 一次补多少条评论（与竞品/交付口径一致：热评 8 条）。
 COMMENTS_PER_VIDEO = 8
+RECOVERY_INTERVAL_SECONDS = 300
+MAX_DELIVERY_ATTEMPTS = 3
 
 
 @dataclass
@@ -144,11 +147,11 @@ def _write_digest(
 async def _wait_for_completion(
     session_id: str,
     *,
-    turns_before: int,
+    expected_text: str = "",
     wait_seconds: float,
     poll_seconds: float,
 ) -> tuple[str, dict[str, Any]]:
-    """等会话出现**新的** turn/end，并返回 ``(conclusion, detail)``。"""
+    """只等待包含本次完整投递消息的那个 turn 完成。"""
     if not session_id:
         return "no_session", {"reason": "没有配置值班员会话"}
     if wait_seconds <= 0:
@@ -157,14 +160,17 @@ async def _wait_for_completion(
     deadline = time.monotonic() + wait_seconds
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        status = read_turn_status(session_id)
+        status = read_turn_status(session_id, expected_text=expected_text)
         last = {
             "found": status.found,
             "turns": status.turns,
             "last_kind": status.last_kind,
             "error": status.error,
+            "matched": status.matched,
+            "message_id": status.message_id,
+            "turn_id": status.turn_id,
         }
-        if status.found and status.turns > turns_before:
+        if expected_text and status.found and status.matched:
             if status.completed:
                 return "ok", last
             if status.last_kind == "error":
@@ -172,6 +178,196 @@ async def _wait_for_completion(
         await asyncio.sleep(poll_seconds)
 
     return "delivered_unverified", {**last, "reason": "等待 DSH 完成超时"}
+
+
+async def _resume_delivery(
+    runtime: Any,
+    item: Any,
+    *,
+    result: CycleResult,
+    wait_seconds: float,
+    poll_seconds: float,
+    lock: Any = None,
+) -> CycleResult:
+    """恢复已经选好的材料；发送前写 sending，崩溃后只能核对、不可重发。"""
+    db, config = runtime.db, runtime.config
+    run_id = str(item["run_id"])
+    result.run_id = run_id
+    sid = str(item["session_id"] or result.session_id)
+    result.session_id = sid
+    payload = json.loads(item["payload_json"])
+    cards = payload["cards"]
+    result.candidates = len(cards)
+    state = str(item["state"])
+    current = int(time.time())
+    if state in {"exhausted", "dsh_error"} or item["next_attempt_at"] > current:
+        result.skipped = True
+        result.conclusion = state
+        result.reason = (
+            "RECOVERY_REQUIRES_REVIEW"
+            if state in {"exhausted", "dsh_error"}
+            else "RECOVERY_BACKOFF"
+        )
+        return result
+
+    def finish(conclusion: str, **detail: Any) -> CycleResult:
+        result.conclusion = conclusion
+        result.detail = {"outbox_run_id": run_id, **detail}
+        db.finish_run(
+            run_id,
+            candidates_n=len(cards),
+            read_n=payload.get("read_n", 0),
+            errors_n=payload.get("errors_n", 0) + int(conclusion not in {"ok", "no_content"}),
+            conclusion=conclusion,
+            detail={
+                "session": sid,
+                "comments": payload.get("comments", []),
+                "trends": payload.get("trends", {}),
+                **result.detail,
+            },
+        )
+        return result
+
+    if payload.get("batch_in_progress"):
+        # A process crash can interrupt the batch between completed reads.
+        # Reapply only its deterministic selection to the atomically saved
+        # cards; never send those videos back through the text worker.
+        read_cards = payload.get("read_cards", [])
+        minimum = int(payload.get("min_score", config.discovery.min_score_for_comment))
+        cap = min(
+            MAX_PER_DELIVERY,
+            int(payload.get("candidate_cap", config.text_worker.max_candidates_to_dsh)),
+        )
+        cards = sorted(
+            [
+                card
+                for card in read_cards
+                if card["relevance_score"] >= minimum or card.get("needs_deep_review")
+            ],
+            key=lambda card: card["relevance_score"],
+            reverse=True,
+        )[:cap]
+        result.candidates = len(cards)
+        payload.update(
+            cards=cards, read_n=len(read_cards), batch_in_progress=False, batch_recovered=True
+        )
+        db.update_cycle_delivery(run_id, payload_json=json.dumps(payload, ensure_ascii=False))
+        if not cards:
+            db.update_cycle_delivery(run_id, state="empty")
+            return finish("batch_interrupted")
+
+    # A lease also keeps a second scheduler from treating an in-flight wait as a crash.
+    db.update_cycle_delivery(
+        run_id,
+        session_id=sid,
+        next_attempt_at=current + max(RECOVERY_INTERVAL_SECONDS, int(wait_seconds) + 60),
+    )
+    text = str(item["prompt"])
+    if not text:
+        prepare_attempts = int(payload.get("prepare_attempts", 0))
+        if prepare_attempts >= MAX_DELIVERY_ATTEMPTS:
+            db.update_cycle_delivery(run_id, state="exhausted")
+            return finish("preparation_exhausted")
+        payload["prepare_attempts"] = prepare_attempts + 1
+        db.update_cycle_delivery(run_id, payload_json=json.dumps(payload, ensure_ascii=False))
+        comments = payload.setdefault("comments", [])
+        completed_comments = payload.setdefault("comments_done", [])
+        for card in cards:
+            key = card["bvid"]
+            if key in completed_comments:
+                continue
+            try:
+                _page, registered = await runtime.pipeline.get_discussion(
+                    bvid=key, limit=COMMENTS_PER_VIDEO
+                )
+                comments.append(f"{key}:{registered}")
+            except RequestsBlocked as exc:
+                return finish(f"BLOCKED:{exc.state}")
+            except RateLimitExceeded:
+                return finish("RATE_LIMIT_EXCEEDED")
+            except Exception as exc:  # one comment source may be unavailable
+                comments.append(f"{key}:ERR:{type(exc).__name__}")
+            completed_comments.append(key)
+            db.update_cycle_delivery(run_id, payload_json=json.dumps(payload, ensure_ascii=False))
+
+        prepared_rows = payload.setdefault("rows", {})
+        async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
+            for card in cards:
+                key = card["bvid"]
+                if key not in prepared_rows:
+                    prepared_rows[key] = await prepare_one(
+                        db, config, client, {"bvid": key, "score": card["relevance_score"]}
+                    )
+                    # Persist every completed condensation, not only the last candidate.
+                    db.update_cycle_delivery(
+                        run_id, payload_json=json.dumps(payload, ensure_ascii=False)
+                    )
+        rows = [row for row in prepared_rows.values() if row is not None]
+        if not rows:
+            db.update_cycle_delivery(run_id, state="empty")
+            return finish("no_content")
+        style_notes: list[str] = []
+        with contextlib.suppress(Exception):
+            style_notes = list(db.owner_preferences_digest().get("note", []))
+        text = render_delivery(rows, cards=cards, run_id=run_id, style_notes=style_notes)
+        db.update_cycle_delivery(run_id, state="ready", prompt=text)
+        state = "ready"
+
+    if state in {"preparing", "ready", "retry"}:
+        attempts = int(item["attempts"])
+        if attempts >= MAX_DELIVERY_ATTEMPTS:
+            db.update_cycle_delivery(run_id, state="exhausted")
+            return finish("delivery_exhausted")
+        db.update_cycle_delivery(
+            run_id, state="sending", attempts=attempts + 1, last_attempt_at=int(time.time())
+        )
+        delivered = await deliver_async(text, session_id=sid)
+        result.delivered = bool(delivered.ok and delivered.delivered)
+        if not result.delivered:
+            safe = bool(delivered.retry_safe)
+            next_state = (
+                ("exhausted" if attempts + 1 >= MAX_DELIVERY_ATTEMPTS else "retry")
+                if safe
+                else "uncertain"
+            )
+            db.update_cycle_delivery(
+                run_id,
+                state=next_state,
+                next_attempt_at=int(time.time()) + RECOVERY_INTERVAL_SECONDS,
+            )
+            result.reason = delivered.error_code or delivered.message
+            return finish(
+                "delivery_failed" if safe else "delivery_uncertain", delivery=delivered.to_dict()
+            )
+        db.update_cycle_delivery(run_id, state="accepted")
+        state = "accepted"
+    elif state == "sending":
+        # The process may have died after followup accepted it, before writing its response.
+        db.update_cycle_delivery(run_id, state="uncertain")
+        state = "uncertain"
+
+    result.delivered = state == "accepted"
+    # DSH can use the normal read tools while processing the saved package.
+    # The persisted lease protects against another recovery during this wait.
+    if lock is not None:
+        lock.release()
+    conclusion, detail = await _wait_for_completion(
+        sid, expected_text=text, wait_seconds=wait_seconds, poll_seconds=poll_seconds
+    )
+    if state == "uncertain" and conclusion == "delivered_unverified":
+        conclusion = "delivery_uncertain"
+    db.update_cycle_delivery(
+        run_id,
+        state="completed"
+        if conclusion == "ok"
+        else "dsh_error"
+        if conclusion == "dsh_error"
+        else state,
+        next_attempt_at=int(time.time()) + RECOVERY_INTERVAL_SECONDS,
+    )
+    if conclusion in {"ok", "dsh_error"}:
+        result.delivered = True
+    return finish(conclusion, turn=detail, chars=len(text))
 
 
 async def run_cycle(
@@ -197,6 +393,16 @@ async def run_cycle(
     try:
         lock = TaskLock(purpose="cycle")
         with lock:
+            pending = db.pending_cycle_delivery()
+            if pending is not None:
+                return await _resume_delivery(
+                    runtime,
+                    pending,
+                    result=result,
+                    wait_seconds=wait_seconds,
+                    poll_seconds=poll_seconds,
+                    lock=lock,
+                )
             run_id = db.start_run(trigger_source)
             result.run_id = run_id
 
@@ -211,9 +417,7 @@ async def run_cycle(
                 try:
                     from core.trends_round import run_trends_round
 
-                    trends = await run_trends_round(
-                        runtime, auto_backfill=True, run_id=run_id
-                    )
+                    trends = await run_trends_round(runtime, auto_backfill=True, run_id=run_id)
                     trends_detail = trends.to_dict()
                     trends_backfilled = list(trends.backfilled)
                     if trends_backfilled:
@@ -234,8 +438,22 @@ async def run_cycle(
             else:
                 trends_detail = {"skipped": "auto_accept_suggestions=false"}
 
+            db.save_cycle_delivery(
+                run_id,
+                session_id=sid,
+                payload={
+                    "cards": [],
+                    "batch_in_progress": True,
+                    "trends": trends_detail,
+                    "min_score": config.discovery.min_score_for_comment,
+                    "candidate_cap": config.text_worker.max_candidates_to_dsh,
+                },
+            )
+            db.update_cycle_delivery(
+                run_id, next_attempt_at=int(time.time()) + RECOVERY_INTERVAL_SECONDS
+            )
             try:
-                batch = await runtime.pipeline.prepare_batch()
+                batch = await runtime.pipeline.prepare_batch(cycle_run_id=run_id)
             except RequestsBlocked as exc:
                 db.finish_run(run_id, errors_n=1, conclusion=f"BLOCKED:{exc.state}")
                 result.conclusion = f"BLOCKED:{exc.state}"
@@ -248,6 +466,17 @@ async def run_cycle(
 
             cards = list(batch.candidates)[:MAX_PER_DELIVERY]
             result.candidates = len(cards)
+            saved = db.pending_cycle_delivery()
+            payload = json.loads(saved["payload_json"])
+            payload.update(
+                cards=[card.to_payload() for card in cards],
+                read_n=len(batch.read_bvids),
+                errors_n=len(batch.failed),
+                batch_in_progress=False,
+            )
+            db.update_cycle_delivery(
+                run_id, payload_json=json.dumps(payload, ensure_ascii=False), next_attempt_at=0
+            )
             _write_digest(
                 db=db,
                 run_id=run_id,
@@ -258,134 +487,30 @@ async def run_cycle(
             )
 
             if not cards:
+                conclusion = "batch_failed" if batch.failed else "no_candidates"
+                db.update_cycle_delivery(run_id, state="empty")
                 db.finish_run(
                     run_id,
                     candidates_n=0,
                     read_n=len(batch.read_bvids),
                     errors_n=len(batch.failed),
-                    conclusion="no_candidates",
+                    conclusion=conclusion,
                     detail={
                         "limitations": batch.limitations[:20],
                         "trends": trends_detail,
                     },
                 )
-                result.conclusion = "no_candidates"
+                result.conclusion = conclusion
                 return result
 
-            # ★ 补评论：prepare_batch 只读简介/字幕；评论要单独拉，
-            #   否则"完整内容"里没有评论区，DSH 的判断会偏。
-            comment_notes: list[str] = []
-            for card in cards:
-                try:
-                    _page, registered = await runtime.pipeline.get_discussion(
-                        bvid=card.bvid, limit=COMMENTS_PER_VIDEO
-                    )
-                    comment_notes.append(f"{card.bvid}:{registered}")
-                except RequestsBlocked as exc:
-                    db.finish_run(
-                        run_id,
-                        candidates_n=len(cards),
-                        read_n=len(batch.read_bvids),
-                        errors_n=len(batch.failed) + 1,
-                        conclusion=f"BLOCKED:{exc.state}",
-                        detail={"comments": comment_notes},
-                    )
-                    result.conclusion = f"BLOCKED:{exc.state}"
-                    return result
-                except RateLimitExceeded:
-                    db.finish_run(
-                        run_id,
-                        candidates_n=len(cards),
-                        read_n=len(batch.read_bvids),
-                        errors_n=len(batch.failed) + 1,
-                        conclusion="RATE_LIMIT_EXCEEDED",
-                        detail={"comments": comment_notes},
-                    )
-                    result.conclusion = "RATE_LIMIT_EXCEEDED"
-                    return result
-                except Exception as exc:  # noqa: BLE001 - 单条评论失败不致命
-                    comment_notes.append(f"{card.bvid}:ERR:{type(exc).__name__}")
-
-            rows: list[dict[str, Any]] = []
-            async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
-                for card in cards:
-                    prepared = await prepare_one(
-                        db,
-                        config,
-                        client,
-                        {"bvid": card.bvid, "score": card.relevance_score},
-                    )
-                    if prepared is not None:
-                        rows.append(prepared)
-
-            if not rows:
-                db.finish_run(
-                    run_id,
-                    candidates_n=len(cards),
-                    read_n=len(batch.read_bvids),
-                    errors_n=len(batch.failed),
-                    conclusion="no_content",
-                    detail={"comments": comment_notes},
-                )
-                result.conclusion = "no_content"
-                return result
-
-            style_notes: list[str] = []
-            try:
-                style_notes = list(db.owner_preferences_digest().get("note", []))
-            except Exception:  # noqa: BLE001 - 偏好读不到不影响本轮
-                style_notes = []
-            text = render_delivery(
-                rows,
-                cards=[card.to_payload() for card in cards],
-                run_id=run_id,
-                style_notes=style_notes,
-            )
-            turns_before = read_turn_status(sid).turns if sid else 0
-            delivered = await deliver_async(text, session_id=sid)
-            result.delivered = bool(delivered.ok and delivered.delivered)
-            if not result.delivered:
-                db.finish_run(
-                    run_id,
-                    candidates_n=len(cards),
-                    read_n=len(batch.read_bvids),
-                    errors_n=len(batch.failed) + 1,
-                    conclusion="delivery_failed",
-                    detail={
-                        "delivery": delivered.to_dict(),
-                        "comments": comment_notes,
-                    },
-                )
-                result.conclusion = "delivery_failed"
-                result.reason = delivered.error_code or delivered.message
-                return result
-
-            # ★ 投递已成功 ⇒ 提前释放任务锁：等 DSH 跑完可能几分钟，
-            #   不能让"手动 prepare_batch"在这段时间里被 LOCKED 挡住。
-            #   （调度器另有"未结束 run"防重入，不会因此并发开第二轮。）
-            lock.release()
-            conclusion, turn_detail = await _wait_for_completion(
-                sid,
-                turns_before=turns_before,
+            return await _resume_delivery(
+                runtime,
+                db.pending_cycle_delivery(),
+                result=result,
                 wait_seconds=wait_seconds,
                 poll_seconds=poll_seconds,
+                lock=lock,
             )
-            result.conclusion = conclusion
-            db.finish_run(
-                run_id,
-                candidates_n=len(cards),
-                read_n=len(batch.read_bvids),
-                errors_n=len(batch.failed),
-                conclusion=conclusion,
-                detail={
-                    "session": sid,
-                    "turn": turn_detail,
-                    "comments": comment_notes,
-                    "chars": len(text),
-                    "trends": trends_detail,
-                },
-            )
-            return result
     except LockError as exc:
         result.skipped = True
         result.reason = f"LOCKED:{exc}"

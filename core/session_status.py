@@ -53,6 +53,9 @@ class TurnStatus:
     completed: bool
     last_kind: str
     error: str
+    matched: bool = False
+    message_id: str = ""
+    turn_id: int | None = None
 
 
 def sessions_home() -> Path:
@@ -119,7 +122,60 @@ def parse_turns(text: str) -> tuple[int, str, bool, str]:
     return turns, last_kind, last_kind == "completed", last_error
 
 
-def read_turn_status(session_id: str, *, home: Path | None = None) -> TurnStatus:
+def parse_delivery_turn(text: str, expected_text: str) -> TurnStatus:
+    """按 DSH 的 turn/start → user/message → turn/end 契约关联精确投递。
+
+    followup 先进入 inbox，只有被处理时才在当前 turn 中落 user/message。
+    不以总轮数、片段命中或后续主人的消息代替本条消息。
+    """
+    active: int | None = None
+    matched_turn: int | None = None
+    message_id = ""
+    ended = 0
+    kind = error = ""
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("data"), dict):
+            continue
+        data = event["data"]
+        if event.get("type") == "turn/start":
+            active = data.get("turn") if isinstance(data.get("turn"), int) else None
+        elif event.get("type") == "user/message" and active is not None:
+            content = data.get("content") or []
+            body = "\n".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if (
+                expected_text
+                and body == expected_text
+                and data.get("role") == "user"
+                and data.get("id")
+            ):
+                # Duplicate matching messages are ambiguous; never guess which one completed.
+                if message_id:
+                    return TurnStatus(True, ended, False, "", "duplicate delivery message")
+                matched_turn, message_id = active, str(data["id"])
+        elif event.get("type") == "turn/end":
+            ended += 1
+            if matched_turn is not None and data.get("turn") == matched_turn:
+                reason = data.get("reason") or {}
+                kind = str(reason.get("kind") or "")
+                error = str((reason.get("error") or {}).get("message") or "")[:160]
+            if data.get("turn") == active:
+                active = None
+    return TurnStatus(
+        True, ended, kind == "completed", kind, error, bool(message_id), message_id, matched_turn
+    )
+
+
+def read_turn_status(
+    session_id: str, *, home: Path | None = None, expected_text: str = ""
+) -> TurnStatus:
     """读一个会话当前的最后一个 turn 状态（找不到文件 → ``found=False``）。"""
     path = find_session_file(session_id, home=home)
     if path is None:
@@ -127,6 +183,8 @@ def read_turn_status(session_id: str, *, home: Path | None = None) -> TurnStatus
     text = decompress(path)
     if not text:
         return TurnStatus(found=False, turns=0, completed=False, last_kind="", error="")
+    if expected_text:
+        return parse_delivery_turn(text, expected_text)
     turns, last_kind, completed, error = parse_turns(text)
     return TurnStatus(
         found=True,

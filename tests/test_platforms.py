@@ -80,12 +80,6 @@ async def test_douyin_rejection_explains_signature_reason() -> None:
     assert "绕过" in message or "逆向" in message
 
 
-def test_xiaohongshu_reason_mentions_legal_cases() -> None:
-    """小红书的拒绝理由要提到已有判决（这是"不做"的依据，不是随口说的）。"""
-    adapter = get_adapter(PLATFORM_XIAOHONGSHU)
-    assert "判决" in adapter.reason or "违法" in adapter.reason
-
-
 @pytest.mark.parametrize("platform", [PLATFORM_DOUYIN, PLATFORM_XIAOHONGSHU])
 def test_unimplemented_capabilities_declare_nothing_available(platform: str) -> None:
     """未接的平台：能力表里**一个 True 都不该有**（不能假装有能力）。"""

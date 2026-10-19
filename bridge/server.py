@@ -26,6 +26,7 @@ from core.config import ConfigError
 from core.health import READY, as_state, human_action_for
 from core.lock import LockError, TaskLock
 from core.pipeline import LEVEL_UNAVAILABLE
+from core.platforms import PlatformError
 from core.ratelimit import RateLimitExceeded, RequestsBlocked
 
 # ★ 启动优化（2026-10-18）：`core.runtime` 单独 import 约 2 秒，
@@ -231,7 +232,10 @@ async def companion_status() -> dict[str, Any]:
             ),
         },
         # ★ 平台接入现状（抖音/小红书只预留框架，走官方授权通道）
-        "platforms": _platform_summary(),
+        "platforms": _platform_summary(runtime.pipeline.adapters),
+        "external_health": [dict(row) for row in db.query(
+            "SELECT platform,account_id,state,error_code FROM content_health"
+        )],
         "notes": [
             "observe 模式下任何公开写入都会被代码层拒绝。",
             "uncertain 动作占用额度且不靠时间自动释放，需人工核对。",
@@ -833,12 +837,14 @@ async def trends_suggest_tool(
 
 @server.tool(
     name="discover_videos",
-    description="按关键词与发布时间搜索 B 站并标准化候选（只读）。含缓存状态。",
+    description=("搜索已配置平台并标准化候选（只读）；platforms 默认配置，"
+                 "外部内容返回不透明 bvid 键。"),
 )
 async def discover_videos(
     keywords: list[str] | None = None,
     days: int | None = None,
     limit: int | None = None,
+    platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     try:
         runtime = await get_runtime()
@@ -849,6 +855,10 @@ async def discover_videos(
         return R.fail(R.INVALID_ARGUMENT, "limit 必须在 1..100")
     if days is not None and (days < 1 or days > 90):
         return R.fail(R.INVALID_ARGUMENT, "days 必须在 1..90")
+    if platforms is not None and (not platforms or any(
+        value not in ("bilibili", "douyin", "xiaohongshu") for value in platforms
+    )):
+        return R.fail(R.INVALID_ARGUMENT, "platforms 只能选 bilibili/douyin/xiaohongshu")
 
     # 没有任何关键词时**明确报错**，不要静默返回空列表让人误以为"今天没新视频"
     effective = keywords or runtime.config.discovery.keywords
@@ -860,22 +870,36 @@ async def discover_videos(
         )
 
     try:
-        result = await runtime.pipeline.discover(keywords=keywords, days=days, limit=limit)
+        args: dict[str, Any] = {"keywords": keywords, "days": days, "limit": limit}
+        if platforms is not None:
+            args["platforms"] = platforms
+        result = await runtime.pipeline.discover(**args)
     except RequestsBlocked as exc:
         return R.fail(R.BLOCKED, str(exc), {"state": exc.state})
     except RateLimitExceeded as exc:
         return R.fail(R.RATE_LIMIT_EXCEEDED, str(exc))
 
+    selected = platforms if platforms is not None else runtime.config.discovery.platforms
+    slots = ",".join("?" for _ in selected)
     videos = runtime.db.query(
-        "SELECT bvid, aid, title, up_name, published_at, duration_sec, source_url, status "
-        "FROM videos ORDER BY COALESCE(published_at,0) DESC LIMIT ?",
-        (limit or runtime.config.discovery.max_candidates_per_run,),
+        "SELECT v.*, COALESCE(s.platform,'bilibili') AS platform, "
+        "COALESCE(s.native_id,v.bvid) AS native_id FROM videos v "
+        "LEFT JOIN content_sources s ON s.content_key=v.bvid "
+        f"WHERE COALESCE(s.platform,'bilibili') IN ({slots}) "
+        "AND (s.platform IS NULL OR (s.platform='douyin' AND s.account_id=?) "
+        "OR (s.platform='xiaohongshu' AND s.account_id=?)) "
+        "ORDER BY COALESCE(v.published_at,0) DESC LIMIT ?",
+        (*selected, runtime.config.external_platforms.douyin.account_id,
+         runtime.config.external_platforms.xiaohongshu.account_id,
+         limit or runtime.config.discovery.max_candidates_per_run),
     )
     return R.ok(
         {
             "candidates": [
                 {
                     "bvid": row["bvid"],
+                    "platform": row["platform"],
+                    "native_id": row["native_id"],
                     "aid": row["aid"],
                     "title": row["title"],
                     "up_name": row["up_name"],
@@ -910,6 +934,7 @@ async def prepare_batch(
     keywords: list[str] | None = None,
     days: int | None = None,
     limit: int | None = None,
+    platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     try:
         runtime = await get_runtime()
@@ -917,6 +942,10 @@ async def prepare_batch(
         return R.fail(R.NOT_CONFIGURED, str(exc))
 
     config = runtime.config
+    if platforms is not None and (not platforms or any(
+        value not in ("bilibili", "douyin", "xiaohongshu") for value in platforms
+    )):
+        return R.fail(R.INVALID_ARGUMENT, "platforms 只能选 bilibili/douyin/xiaohongshu")
     worker_ok, worker_code = config.text_worker_status()
     if not worker_ok:
         # 任务书 §3：定时批量任务**不能**偷偷退化为"DSH 读全文"
@@ -932,9 +961,10 @@ async def prepare_batch(
         with lock:
             run_id = runtime.db.start_run("manual")
             try:
-                batch = await runtime.pipeline.prepare_batch(
-                    keywords=keywords, days=days, limit=limit
-                )
+                args: dict[str, Any] = {"keywords": keywords, "days": days, "limit": limit}
+                if platforms is not None:
+                    args["platforms"] = platforms
+                batch = await runtime.pipeline.prepare_batch(**args)
             except RequestsBlocked as exc:
                 runtime.db.finish_run(
                     run_id, errors_n=1, conclusion=f"BLOCKED:{exc.state}"
@@ -973,9 +1003,15 @@ async def prepare_batch(
         "不返回完整字幕、简介或 README。"
     ),
 )
-async def read_video(bvid: str) -> dict[str, Any]:
-    if not bvid or not bvid.startswith("BV"):
-        return R.fail(R.INVALID_ARGUMENT, "bvid 形如 BV1xxxxxxxxx")
+async def read_video(
+    bvid: str, platform: str = "", context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not bvid:
+        return R.fail(R.INVALID_ARGUMENT, "bvid / native_id 必填")
+    if platform and platform not in ("bilibili", "douyin", "xiaohongshu"):
+        return R.fail(R.INVALID_ARGUMENT, "未知平台")
+    if not platform and not bvid.startswith(("BV", "douyin:", "xiaohongshu:")):
+        return R.fail(R.INVALID_ARGUMENT, "请使用 BV、discover 返回的键，或显式指定 platform")
 
     try:
         runtime = await get_runtime()
@@ -983,12 +1019,17 @@ async def read_video(bvid: str) -> dict[str, Any]:
         return R.fail(R.NOT_CONFIGURED, str(exc))
 
     try:
-        card, blocks = await runtime.pipeline.read_video(bvid)
+        if platform:
+            card, blocks = await runtime.pipeline.read_content(platform, bvid, context=context)
+        else:
+            card, blocks = await runtime.pipeline.read_video(bvid)
     except RequestsBlocked as exc:
         return R.fail(R.BLOCKED, str(exc), {"state": exc.state})
     except RateLimitExceeded as exc:
         return R.fail(R.RATE_LIMIT_EXCEEDED, str(exc))
     except BilibiliReadError as exc:
+        return R.fail(exc.code, str(exc))
+    except PlatformError as exc:
         return R.fail(exc.code, str(exc))
 
     payload = card.to_payload()
@@ -1040,8 +1081,8 @@ async def read_evidence_excerpt(evidence_id: str) -> dict[str, Any]:
     ),
 )
 async def get_discussion(bvid: str, page: int = 1, limit: int = 20) -> dict[str, Any]:
-    if not bvid or not bvid.startswith("BV"):
-        return R.fail(R.INVALID_ARGUMENT, "bvid 形如 BV1xxxxxxxxx")
+    if not bvid or not bvid.startswith(("BV", "douyin:", "xiaohongshu:")):
+        return R.fail(R.INVALID_ARGUMENT, "需要已发现内容的 bvid 键")
     if page < 1 or page > 20:
         return R.fail(R.INVALID_ARGUMENT, "page 必须在 1..20")
     if limit < 1 or limit > 50:
@@ -1061,6 +1102,8 @@ async def get_discussion(bvid: str, page: int = 1, limit: int = 20) -> dict[str,
     except RateLimitExceeded as exc:
         return R.fail(R.RATE_LIMIT_EXCEEDED, str(exc))
     except BilibiliReadError as exc:
+        return R.fail(exc.code, str(exc))
+    except PlatformError as exc:
         return R.fail(exc.code, str(exc))
 
     return R.ok(
@@ -1113,8 +1156,8 @@ async def save_analysis(
     knowledge_tags: list[str] | None = None,
     evidence_level: str = LEVEL_UNAVAILABLE,
 ) -> dict[str, Any]:
-    if not bvid or not bvid.startswith("BV"):
-        return R.fail(R.INVALID_ARGUMENT, "bvid 形如 BV1xxxxxxxxx")
+    if not bvid or not bvid.startswith(("BV", "douyin:", "xiaohongshu:")):
+        return R.fail(R.INVALID_ARGUMENT, "需要已发现内容的 bvid 键")
     if not evidence_ids:
         return R.fail(R.EVIDENCE_REQUIRED, "必须提供至少一个真实读到的 evidence_id")
     if score_total < 0 or score_total > 100:
@@ -1726,8 +1769,8 @@ async def owner_preferences(
     description="记录主人对某个视频的评价，只影响下一轮排序，不修改公开动作授权。",
 )
 async def feedback(bvid: str, verdict: str, note: str = "") -> dict[str, Any]:
-    if not bvid or not bvid.startswith("BV"):
-        return R.fail(R.INVALID_ARGUMENT, "bvid 形如 BV1xxxxxxxxx")
+    if not bvid or not bvid.startswith(("BV", "douyin:", "xiaohongshu:")):
+        return R.fail(R.INVALID_ARGUMENT, "需要已发现内容的 bvid 键")
     if verdict not in ("useful", "not_useful"):
         return R.fail(R.INVALID_ARGUMENT, "verdict 必须是 useful 或 not_useful")
 
@@ -1924,12 +1967,12 @@ def _trends_adoptions(db: Any) -> dict[str, Any]:
     }
 
 
-def _platform_summary() -> list[dict[str, Any]]:
+def _platform_summary(adapters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """各平台接入现状（只读；未接入的会带上"为什么没做"）。"""
     try:
         from core.platforms import platform_overview
 
-        return platform_overview()
+        return platform_overview(adapters=adapters)
     except Exception as exc:  # noqa: BLE001
         return [{"error": type(exc).__name__}]
 

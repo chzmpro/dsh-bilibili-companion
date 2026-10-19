@@ -508,9 +508,11 @@ def platforms_cmd() -> None:
     这里如实说明"为什么没做"与"规划中的接入方式"。
     """
     _configure_stdio()
+    from core.external_platforms import build_external_adapters
     from core.platforms import platform_overview
 
-    for item in platform_overview():
+    adapters = build_external_adapters(_load_config().external_platforms)
+    for item in platform_overview(adapters=adapters):
         mark = "已接入" if item["implemented"] else "未接入"
         typer.secho(f"{item['platform']:<14} {mark}", fg=(
             typer.colors.GREEN if item["implemented"] else typer.colors.YELLOW
@@ -523,6 +525,115 @@ def platforms_cmd() -> None:
         if item.get("blocked_reason"):
             typer.echo(f"    为什么没做：{item['blocked_reason']}")
         typer.echo("")
+
+
+@app.command("platform-resume")
+def platform_resume(
+    platform: str, account_id: str = typer.Option(..., "--account-id"),
+) -> None:
+    """人工完成验证码/重新登录后恢复指定外部平台账号；不进入 MCP。"""
+    from core.content import EXTERNAL_PLATFORMS, recover_content_health
+
+    if platform not in EXTERNAL_PLATFORMS:
+        raise typer.BadParameter("platform 必须是 douyin 或 xiaohongshu")
+    with _open_db() as db:
+        changed = recover_content_health(db, platform, account_id)
+    typer.echo("已恢复指定账号" if changed else "指定账号没有待恢复状态")
+
+
+@app.command("cycle-deliveries")
+def cycle_deliveries(
+    abandon: str = typer.Option("", "--abandon", help="人工核对后放弃指定 run，不重发"),
+    reason: str = typer.Option("", "--reason", help="人工处置理由，必填"),
+) -> None:
+    """查看待投递包；人工归档阻塞包，不把归档伪装为完成，不输出整份原文。"""
+    import time
+
+    from core.lock import LockError, TaskLock
+
+    _configure_stdio()
+    if abandon and not reason.strip():
+        raise typer.BadParameter("--abandon 必须同时提供 --reason，且本人已核对该批次")
+    with _open_db() as db:
+        if abandon:
+            try:
+                with TaskLock(purpose="cycle-delivery-review"):
+                    row = db.query_one("SELECT * FROM cycle_outbox WHERE run_id=?", (abandon,))
+                    if row is None:
+                        raise typer.BadParameter("指定 run 没有待投递包")
+                    if (row["state"] in {"sending", "accepted"}
+                            and row["next_attempt_at"] > time.time()):
+                        raise typer.BadParameter("该批次仍在发送/等待中，请等待当前处理结束")
+                    if row["state"] not in {"completed", "empty"}:
+                        db.update_cycle_delivery(abandon, state="empty")
+                        db.finish_run(abandon, conclusion="abandoned_by_owner",
+                                      detail={"reviewed_by": "human_cli", "reason": reason})
+            except LockError as exc:
+                raise typer.BadParameter("自动轮正在运行，请稍后人工核对") from exc
+        rows = db.query(
+            "SELECT run_id,session_id,state,attempts,next_attempt_at,updated_at "
+            "FROM cycle_outbox WHERE state NOT IN ('completed','empty') ORDER BY created_at"
+        )
+        typer.echo(json.dumps([dict(row) for row in rows], ensure_ascii=False, indent=2))
+
+
+@app.command("discover-content")
+def discover_content(
+    platform: str = typer.Option("bilibili", "--platform"),
+    keyword: str = typer.Option("", "--keyword"),
+    limit: int = typer.Option(3, "--limit", min=1, max=100),
+) -> None:
+    """搜索一个已配置的平台，不触发发评、私信或 DSH。"""
+    import asyncio
+
+    from core.platforms import KNOWN_PLATFORMS
+    from core.runtime import build_runtime
+
+    if platform not in KNOWN_PLATFORMS:
+        raise typer.BadParameter("未知平台")
+
+    async def run() -> dict[str, Any]:
+        runtime = await build_runtime(with_worker=False)
+        try:
+            result = await runtime.pipeline.discover(
+                keywords=[keyword] if keyword else None, limit=limit, platforms=[platform],
+            )
+            return {"candidates": [vars(item) for item in result.candidates],
+                    "errors": result.errors}
+        finally:
+            await runtime.aclose()
+
+    _configure_stdio()
+    typer.echo(json.dumps(asyncio.run(run()), ensure_ascii=False, indent=2))
+
+
+@app.command("read-content")
+def read_content_cmd(
+    content_id: str, platform: str = typer.Option("", "--platform"),
+) -> None:
+    """读取发现返回的 bvid 键；或 --platform 加原生 ID；仅输出短包与证据 ID。"""
+    import asyncio
+
+    from core.platforms import PlatformError
+    from core.runtime import build_runtime
+
+    async def run() -> dict[str, Any]:
+        runtime = await build_runtime()
+        try:
+            if platform:
+                card, blocks = await runtime.pipeline.read_content(platform, content_id)
+            else:
+                card, blocks = await runtime.pipeline.read_video(content_id)
+            return {**card.to_payload(), "evidence_ids": [b["evidence_id"] for b in blocks]}
+        finally:
+            await runtime.aclose()
+
+    _configure_stdio()
+    try:
+        typer.echo(json.dumps(asyncio.run(run()), ensure_ascii=False, indent=2))
+    except PlatformError as exc:
+        typer.echo(json.dumps({"error": exc.code}, ensure_ascii=False))
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("dm-poll")

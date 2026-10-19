@@ -76,9 +76,7 @@ async def test_cycle_delivers_short_cards_and_full_content(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(db)
-    db.add_owner_preference(
-        kind="note", subject="表达风格（自动学习）", content="开头先给结论"
-    )
+    db.add_owner_preference(kind="note", subject="表达风格（自动学习）", content="开头先给结论")
     runtime = FakeRuntime(db, _config(), _batch())
     captured: dict[str, Any] = {}
 
@@ -94,11 +92,21 @@ async def test_cycle_delivers_short_cards_and_full_content(
 
     turns = {"n": 0}
 
-    def fake_turn(session_id: str) -> TurnStatus:
+    def fake_turn(session_id: str, *, expected_text: str = "") -> TurnStatus:
         turns["n"] += 1
         if turns["n"] <= 1:
             return TurnStatus(found=True, turns=3, completed=False, last_kind="completed", error="")
-        return TurnStatus(found=True, turns=4, completed=True, last_kind="completed", error="")
+        assert expected_text == captured["text"]
+        return TurnStatus(
+            found=True,
+            turns=4,
+            completed=True,
+            last_kind="completed",
+            error="",
+            matched=True,
+            message_id="learning-message",
+            turn_id=4,
+        )
 
     monkeypatch.setattr("core.cycle.deliver_async", fake_deliver)
     monkeypatch.setattr("core.cycle._write_digest", fake_write_digest)
@@ -174,7 +182,9 @@ async def test_cycle_dsh_timeout_marks_unverified(
     monkeypatch.setattr("core.cycle._write_digest", lambda **kw: None)
     monkeypatch.setattr(
         "core.cycle.read_turn_status",
-        lambda session_id: TurnStatus(found=True, turns=3, completed=False, last_kind="", error=""),
+        lambda session_id, **kw: TurnStatus(
+            found=True, turns=3, completed=False, last_kind="", error=""
+        ),
     )
     result = await run_cycle(runtime=runtime, session_id="s", wait_seconds=0.05, poll_seconds=0.01)
     assert result.conclusion == "delivered_unverified"
@@ -221,7 +231,7 @@ async def test_cycle_runs_trends_backfill_before_discover(
     monkeypatch.setattr("core.cycle._write_digest", lambda **kw: None)
     polls = {"n": 0}
 
-    def fake_turn(session_id: str) -> TurnStatus:
+    def fake_turn(session_id: str, *, expected_text: str = "") -> TurnStatus:
         polls["n"] += 1
         # 第一次是"投递前"的基线（turns=3），之后出现新的 completed
         return TurnStatus(
@@ -230,13 +240,14 @@ async def test_cycle_runs_trends_backfill_before_discover(
             completed=polls["n"] > 1,
             last_kind="completed",
             error="",
+            matched=bool(expected_text),
+            message_id="learning-message",
+            turn_id=4,
         )
 
     monkeypatch.setattr("core.cycle.read_turn_status", fake_turn)
 
-    result = await run_cycle(
-        runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01
-    )
+    result = await run_cycle(runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01)
     assert order == ["trends", "prepare_batch"], "必须先抽词再发现"
     assert result.conclusion == "ok"
     row = db.query_one("SELECT detail_json FROM runs WHERE run_id = ?", (result.run_id,))
@@ -265,7 +276,7 @@ async def test_cycle_skips_trends_when_backfill_off(
     monkeypatch.setattr("core.cycle._write_digest", lambda **kw: None)
     polls = {"n": 0}
 
-    def fake_turn2(session_id: str) -> TurnStatus:
+    def fake_turn2(session_id: str, *, expected_text: str = "") -> TurnStatus:
         polls["n"] += 1
         return TurnStatus(
             found=True,
@@ -273,12 +284,13 @@ async def test_cycle_skips_trends_when_backfill_off(
             completed=polls["n"] > 1,
             last_kind="completed",
             error="",
+            matched=bool(expected_text),
+            message_id="learning-message",
+            turn_id=4,
         )
 
     monkeypatch.setattr("core.cycle.read_turn_status", fake_turn2)
-    result = await run_cycle(
-        runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01
-    )
+    result = await run_cycle(runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01)
     assert calls == []
     row = db.query_one("SELECT detail_json FROM runs WHERE run_id = ?", (result.run_id,))
     assert row is not None and "auto_accept_suggestions=false" in str(row["detail_json"])

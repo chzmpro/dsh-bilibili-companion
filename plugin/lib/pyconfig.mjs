@@ -45,6 +45,7 @@ import { join } from 'node:path'
 export const EDITABLE_KEYS = Object.freeze({
   // ---- 关注什么 ----------------------------------------------------------
   'discovery.keywords': { type: 'block-list', note: '关注关键词' },
+  'discovery.platforms': { type: 'inline-list', note: '读取平台（外部后端需先人工配置）' },
   'discovery.published_within_days': { type: 'int', note: '只看最近几天' },
   'discovery.max_candidates_per_run': { type: 'int', note: '每轮最多几个候选' },
   'discovery.max_full_reads_per_run': { type: 'int', note: '每轮最多完整读几条' },
@@ -118,6 +119,11 @@ export const EDITABLE_KEYS = Object.freeze({
   // 本地 ASR 兜底（默认关）：装了 faster-whisper 才有意义
   'text_worker.asr_fallback': { type: 'bool', note: '本地转写兜底（需装依赖）' },
   'text_worker.asr_model': { type: 'str', note: 'Whisper 模型大小' },
+  'ocr.enabled': { type: 'bool', note: '本地图片文字识别（需已安装Tesseract）' },
+  'ocr.languages': { type: 'str', note: 'OCR语言包，如 chi_sim+eng' },
+  'ocr.max_images': { type: 'int', note: '每条内容最多识别几张图片' },
+  'ocr.timeout_seconds': { type: 'float', note: '每张图片识别超时（秒）' },
+  'ocr.max_image_bytes': { type: 'int', note: '每张图片下载字节上限' },
 
   // ---- 人设 --------------------------------------------------------------
   'persona.display_name': { type: 'str', note: '小号自称' },
@@ -202,6 +208,30 @@ export const NEVER_EDITABLE = Object.freeze([
   'interaction.pause',
   'interaction.dm_reply_enabled',
   'text_worker.api_key_env',
+  // 后端命令/环境变量名/身份必须由人编辑YAML；设置页不执行任意程序。
+  'external_platforms.xiaohongshu.enabled',
+  'external_platforms.xiaohongshu.transport',
+  'external_platforms.xiaohongshu.url',
+  'external_platforms.xiaohongshu.command',
+  'external_platforms.xiaohongshu.args',
+  'external_platforms.xiaohongshu.env_names',
+  'external_platforms.xiaohongshu.account_id',
+  'external_platforms.xiaohongshu.timeout_sec',
+  'external_platforms.xiaohongshu.min_interval_seconds',
+  'external_platforms.xiaohongshu.cache_ttl_seconds',
+  'external_platforms.xiaohongshu.asr_enabled',
+  'external_platforms.douyin.enabled',
+  'external_platforms.douyin.transport',
+  'external_platforms.douyin.url',
+  'external_platforms.douyin.command',
+  'external_platforms.douyin.args',
+  'external_platforms.douyin.env_names',
+  'external_platforms.douyin.account_id',
+  'external_platforms.douyin.timeout_sec',
+  'external_platforms.douyin.min_interval_seconds',
+  'external_platforms.douyin.cache_ttl_seconds',
+  'external_platforms.douyin.asr_enabled',
+  'ocr.command',
 ])
 
 

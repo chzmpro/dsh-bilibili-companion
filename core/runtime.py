@@ -12,6 +12,7 @@ from typing import Any
 from core.bilibili import BilibiliReader
 from core.config import Config, load_config
 from core.credentials import CredentialError, load_cookie
+from core.external_platforms import build_external_adapters
 from core.pipeline import Pipeline
 from core.ratelimit import RequestQueue
 from core.secrets import secret_fingerprint, secret_source
@@ -29,6 +30,9 @@ class Runtime:
     pipeline: Pipeline
 
     async def aclose(self) -> None:
+        for key, adapter in self.pipeline.adapters.items():
+            if key != "bilibili":
+                await adapter.aclose()
         await self.queue.aclose()
         if self.worker is not None:
             await self.worker.aclose()
@@ -63,8 +67,9 @@ async def build_runtime(
     reader_queue = queue or RequestQueue(db=db, config=config)
     reader = BilibiliReader(queue=reader_queue, cookies=cookies)
     worker = TextWorker(db=db, config=config) if with_worker else None
+    adapters = build_external_adapters(config.external_platforms)
     pipeline = Pipeline(
-        db=db, config=config, reader=reader, queue=reader_queue, worker=worker
+        db=db, config=config, reader=reader, queue=reader_queue, worker=worker, adapters=adapters,
     )
     return Runtime(
         config=config,

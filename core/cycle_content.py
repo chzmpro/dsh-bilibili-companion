@@ -54,8 +54,9 @@ def collect_raw(db: Any, bvid: str) -> dict[str, Any]:
     """取一个视频的原始内容（简介/字幕/评论，**未整理**）。"""
     video = db.query_one("SELECT title, up_name, source_url FROM videos WHERE bvid = ?", (bvid,))
     rows = db.query(
-        "SELECT source_type, text FROM evidence "
-        "WHERE bvid = ? AND availability = 'available' ORDER BY start_sec",
+        "SELECT e.source_type,e.text,p.page_index FROM evidence e "
+        "LEFT JOIN evidence_pages p ON p.evidence_id=e.evidence_id "
+        "WHERE bvid = ? AND availability = 'available' ORDER BY p.page_index,start_sec",
         (bvid,),
     )
     description: list[str] = []
@@ -68,8 +69,8 @@ def collect_raw(db: Any, bvid: str) -> dict[str, Any]:
             continue
         if kind == "description":
             description.append(text)
-        elif kind in ("subtitle", "asr"):
-            subtitle.append(text)
+        elif kind in ("subtitle", "asr", "ocr"):
+            subtitle.append(f"[图片OCR第{row['page_index']}页] {text}" if kind == "ocr" else text)
         elif kind == "comment":
             comments.append(text)
 
@@ -80,6 +81,7 @@ def collect_raw(db: Any, bvid: str) -> dict[str, Any]:
         "description": "\n".join(description),
         "subtitle": "\n".join(subtitle),
         "comments": comments,
+        "source_url": str(video["source_url"] or "") if video else "",
     }
 
 
@@ -101,13 +103,18 @@ async def prepare_one(
     comments_out, com_condensed = await condense_text(
         text=comments_text, config=config, client=client
     )
+    description, description_condensed = await condense_text(
+        text=raw["description"], config=config, client=client
+    )
 
     return {
         "bvid": item["bvid"],
         "score": item["score"],
         "title": raw["title"],
         "up_name": raw["up_name"],
-        "description": raw["description"],
+        "description": description,
+        "description_condensed": description_condensed,
+        "source_url": raw["source_url"],
         "subtitle": subtitle,
         "subtitle_condensed": sub_condensed,
         "comments": comments_out,
@@ -149,7 +156,9 @@ def render_delivery(
             "2. 先用你自己的判断做**真实评判**：可以说哪条不值得推、可以调工具核实；",
             "3. 最后挑 **1~3 条**真正值得的，给每一条发一条 `dm_push` 私信：",
             "   - 文本 ≤500 字，说清「为什么值得看」，不要复述标题；",
-            '   - 有视频的可带 `share_bvid="BV..."`（卡片不支持时会自动降级为带链接的文本）；',
+            '   - 只有 B 站 BV 内容可带 `share_bvid="BV..."`；'
+            '抖音/小红书用原始链接文本，不伪造 BV；',
+            "   - 外部平台本轮仅可学习；不要调用 B 站发评/点赞/收藏工具处理外部内容；",
             "4. 如果主人之后回复表达喜欢/不喜欢，调 `feedback(bvid, verdict)` 记录；",
             "5. 想避免重复推荐，可先调 `search_notes`（若工具可用）看以前学过什么。",
             "",
@@ -166,7 +175,10 @@ def render_delivery(
         parts.append(f"【{row['score']} 分】{row['title']}")
         if row.get("up_name"):
             parts.append(f"UP：{row['up_name']}")
-        parts.append(f"链接：https://www.bilibili.com/video/{row['bvid']}/")
+        link = row.get("source_url") or (
+            f"https://www.bilibili.com/video/{row['bvid']}/" if row["bvid"].startswith("BV") else ""
+        )
+        parts.append(f"链接：{link}")
         parts.append("")
 
         if row["description"]:
@@ -180,7 +192,7 @@ def render_delivery(
                 if row["subtitle_condensed"]
                 else "（全文）"
             )
-            parts.append(f"【视频字幕】{note}")
+            parts.append(f"【字幕 / 转写 / 图片OCR文字（非人工视觉核验）】{note}")
             parts.append(row["subtitle"])
             parts.append("")
 

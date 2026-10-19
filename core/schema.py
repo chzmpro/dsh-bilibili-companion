@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -726,6 +726,87 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         CREATE INDEX IF NOT EXISTS idx_keyword_adoptions_state
             ON keyword_adoptions(state, adopted_at DESC);
+        """,
+    ),
+    (
+        17,
+        """
+        CREATE TABLE IF NOT EXISTS cycle_outbox (
+            run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+            session_id TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'preparing',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            prompt TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER,
+            next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            CHECK (state IN ('preparing','ready','sending','retry','accepted',
+                            'uncertain','completed','dsh_error','exhausted','empty'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_cycle_outbox_pending
+            ON cycle_outbox(state, created_at);
+        """,
+    ),
+    (
+        18,
+        """
+        -- External content keeps existing foreign keys through an opaque namespaced bvid.
+        CREATE TABLE content_sources (
+            content_key TEXT PRIMARY KEY REFERENCES videos(bvid) ON DELETE CASCADE,
+            platform TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            native_id TEXT NOT NULL,
+            author_id TEXT NOT NULL DEFAULT '',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(platform, account_id, native_id)
+        );
+        CREATE TABLE content_health (
+            platform TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'ready',
+            error_code TEXT NOT NULL DEFAULT '',
+            next_request_at REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(platform, account_id)
+        );
+        CREATE TABLE content_cache (
+            cache_key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        -- No published table has a foreign key to evidence; copy IDs verbatim before rename.
+        CREATE TABLE evidence_v18 (
+            evidence_id TEXT PRIMARY KEY,
+            bvid TEXT NOT NULL REFERENCES videos(bvid) ON DELETE CASCADE,
+            source_type TEXT NOT NULL,
+            source_url TEXT NOT NULL DEFAULT '',
+            start_sec REAL,
+            end_sec REAL,
+            text TEXT NOT NULL,
+            text_sha256 TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            availability TEXT NOT NULL DEFAULT 'available',
+            CHECK(source_type IN ('subtitle','asr','description','readme','comment','ocr')),
+            CHECK(availability IN ('available','partial','unavailable'))
+        );
+        INSERT INTO evidence_v18 SELECT * FROM evidence;
+        DROP TABLE evidence;
+        ALTER TABLE evidence_v18 RENAME TO evidence;
+        CREATE INDEX idx_evidence_bvid ON evidence(bvid);
+        CREATE INDEX idx_evidence_sha ON evidence(text_sha256);
+        CREATE TABLE evidence_pages (
+            evidence_id TEXT PRIMARY KEY REFERENCES evidence(evidence_id) ON DELETE CASCADE,
+            page_index INTEGER NOT NULL
+        );
+        CREATE TABLE content_comments (
+            content_key TEXT NOT NULL REFERENCES videos(bvid) ON DELETE CASCADE,
+            remote_id TEXT NOT NULL,
+            author_id TEXT NOT NULL DEFAULT '',
+            author_name TEXT NOT NULL DEFAULT '',
+            evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id) ON DELETE CASCADE,
+            PRIMARY KEY(content_key,remote_id)
+        );
         """,
     ),
 )

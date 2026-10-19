@@ -15,6 +15,7 @@ account:
   owner_name_hint: "" # 仅帮助找 @ 候选；身份一律以 UID 为准
 
 discovery:
+  platforms: [bilibili] # 外部读取默认关闭；部署后再加入 xiaohongshu / douyin
   keywords:
     - "DSH插件"
     - "DeepSeek Harness"
@@ -36,6 +37,39 @@ discovery:
   # ★ 关键词总数上限（自动回填到这里就停）。
   #   每多一个词就多一路搜索请求 ⇒ 请求量与风控暴露面线性上涨。
   max_keywords: 12
+
+external_platforms:
+  # 后端需本人独立部署/登录，详见 docs/platforms-douyin-xiaohongshu.md。
+  # 凭据只填环境变量名，不在URL/command/args/YAML放Cookie或token。
+  xiaohongshu:
+    enabled: false
+    transport: http
+    url: http://127.0.0.1:18060/mcp
+    account_id: default
+    timeout_sec: 30
+    min_interval_seconds: 5
+    cache_ttl_seconds: 3600
+    headers_env: {}
+  douyin:
+    enabled: false
+    transport: stdio
+    command: "" # 独立后端环境的Python绝对路径
+    args: [] # 后端server.py绝对路径
+    account_id: default
+    timeout_sec: 60
+    min_interval_seconds: 5
+    cache_ttl_seconds: 3600
+    asr_enabled: false # 仅显式开启后才允许后端本地转写
+    env_names: []
+    headers_env: {}
+
+ocr:
+  enabled: false # 本地Tesseract，非豆包识图；未安装时如实报告未读
+  command: tesseract
+  languages: chi_sim+eng
+  max_images: 6
+  timeout_seconds: 20
+  max_image_bytes: 10485760
 
 persona:
   # ★ 以下取自 curator 的 docs/13-agent-persona.md（21 题问卷定稿）
