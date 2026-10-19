@@ -234,6 +234,74 @@ async def test_stats_counts_rounds(db: Database) -> None:
     assert watcher.stats.rounds == 2
 
 
+async def test_ack_happens_before_delivery_and_carries_text(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 主人 2026-10-19：「消息和豆包的接不上」。
+
+    豆包必须先回占位，**再**投递给值班员；投递文本里要带上豆包回了什么，
+    否则 DSH 只看到主人原话，两边各说各话。
+    """
+    order: list[str] = []
+    captured: dict[str, str] = {}
+
+    class _Outcome:
+        new_messages = [{"msg_seqno": 42, "text": "主人说：看看今天有什么", "title": ""}]
+        unread = 1
+        skipped = 0
+
+    async def fake_poll_once(**_kwargs: Any) -> Any:
+        return _Outcome()
+
+    async def fake_ack(
+        *, db: Database, config: Any, cookies: Any, msg_seqno: int, text: str
+    ) -> Any:
+        order.append("ack")
+        db.execute(
+            "UPDATE dm_inbox SET acked_at = 1, ack_text = ? WHERE msg_seqno = ?",
+            (text, int(msg_seqno)),
+        )
+        class _R:
+            msg_key = "k"
+        return True, "ok"
+
+    async def fake_deliver(text: str, **_kwargs: Any) -> Any:
+        order.append("deliver")
+        captured["prompt"] = text
+
+        class _R:
+            ok = True
+            delivered = True
+            session_id = "session-d3af12f6-a4fb-4e61-a1e1-02eb94b2a1e9"
+
+        return _R()
+
+    monkeypatch.setattr(dm_watch, "poll_once", fake_poll_once)
+    monkeypatch.setattr(dm_watch, "ack_to", fake_ack)
+    monkeypatch.setattr(dm_watch, "dm_reply_allowed", lambda _cfg: (True, "OK"))
+    monkeypatch.setattr("core.dm_deliver.is_session_alive", lambda _sid: True)
+    monkeypatch.setattr("core.dm_deliver.deliver_async", fake_deliver)
+    monkeypatch.setattr(
+        "core.dm_deliver.read_plugin_config",
+        lambda: {"watchSessionId": "session-d3af12f6-a4fb-4e61-a1e1-02eb94b2a1e9"},
+    )
+
+    watcher = DmWatcher(
+        db=db,
+        config=_FakeConfig(),
+        queue=_FakeQueue(),
+        cookies=_FakeCookies(),
+        auto_reply=True,
+        reply_text="先看看，我马上细说",
+        deliver_delay_seconds=0,
+    )
+    await watcher.poll_once_round()
+
+    assert order == ["ack", "deliver"], "必须先回占位，再投递"
+    assert "先看看，我马上细说" in captured["prompt"], "投递文本要带上豆包的占位内容"
+    assert "接着它说" in captured["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # ★★ 单轮失败不能让监听死
 # ---------------------------------------------------------------------------

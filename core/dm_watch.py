@@ -348,19 +348,6 @@ class DmWatcher:
                 f"发现 {found} 条新消息（入队 {queued}）：{outcome.new_messages[-1]['text'][:30]}",
             )
 
-            # ★ 投递给「值班员」会话（主人自建的常驻会话，零冷启动）
-            #
-            # 主人：「难道不能我自己专门开个会话给你用吗，非得你自己调用呢」
-            # ⇒ 是的，而且更好：`agents.get(sid).followup(msg)` 把私信投进去，
-            #   那个 agent 自己思考、自己调 dm_reply，不用起新进程。
-            await self._deliver_to_duty(outcome.new_messages[-1])
-
-        # ★ 补投：本轮没发现新消息时，看看有没有**上次没投出去**的
-        if not found:
-            waiting = self._undelivered()
-            if waiting is not None:
-                await self._deliver_to_duty(waiting)
-
         replied = 0
         if found and self.auto_reply:
             allowed, reason = dm_reply_allowed(self.config)
@@ -395,6 +382,18 @@ class DmWatcher:
                             self.stats.add("replied", f"已先回占位 {seqno}")
                         else:
                             self.stats.add("skipped", message)
+
+        # ★★ 顺序很重要（2026-10-19 主人反馈「消息和豆包的接不上」）：
+        #   必须**先让豆包回占位，再投递给值班员** ——
+        #   否则 DSH 收到的 prompt 里根本没有豆包说过什么，
+        #   两边各说各话。投递时会把 `dm_inbox.ack_text` 一起带上。
+        if found:
+            await self._deliver_to_duty(outcome.new_messages[-1])
+        else:
+            # ★ 补投：本轮没发现新消息时，看看有没有**上次没投出去**的
+            waiting = self._undelivered()
+            if waiting is not None:
+                await self._deliver_to_duty(waiting)
 
         self.stats.replied += replied
         return {
@@ -492,13 +491,36 @@ class DmWatcher:
         if title:
             text = f"{text}（分享视频：{title}）"
 
-        prompt = (
-            "【主人的新私信】" + text + chr(10) + chr(10)
-            + "请调用 dm_inbox 取出待回复的私信，用你自己的判断写回复，"
-            + "然后调 dm_reply 发出。不要用模板。"
-            + "（如果豆包已经先回过一条占位，你仍然用 dm_reply 给出正式回答；"
-            + "占位不会占用你的回复名额。）"
+        # ★ 把「豆包先回了什么」一起投过去（2026-10-19 主人反馈：消息和豆包接不上）。
+        #   不带上这句，DSH 只看到主人的原话，不知道豆包已经答过，
+        #   于是两边各说各话（重复 / 打架）。
+        ack_text = ""
+        seqno = int(message.get("msg_seqno") or 0)
+        if seqno > 0:
+            with contextlib.suppress(Exception):
+                row = self._handle().query_one(
+                    "SELECT ack_text FROM dm_inbox WHERE msg_seqno = ?", (seqno,)
+                )
+                if row is not None:
+                    ack_text = str(row["ack_text"] or "").strip()
+
+        parts = ["【主人的新私信】" + text, ""]
+        if ack_text:
+            parts.extend(
+                [
+                    "豆包（你的草稿助手）已经**先**回了这条：",
+                    f"「{ack_text}」",
+                    "请**接着它说**：不要重复它已经讲过的话；如果它说得不准、不够，"
+                    "直接纠正并给出更好的回答。",
+                    "",
+                ]
+            )
+        parts.append(
+            "请调用 dm_inbox 取出待回复的私信"
+            "（items[*].acked / ack_text 里能看到豆包先回了什么），"
+            "用你自己的判断写回复，然后调 dm_reply 发出。不要用模板。"
         )
+        prompt = "\n".join(parts)
         try:
             from core.dm_deliver import deliver_async
 
