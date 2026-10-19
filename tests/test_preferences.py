@@ -118,14 +118,18 @@ def test_migration_v3_to_v4_preserves_data(tmp_path: object) -> None:
     db2.close()
 
 
-def test_schema_version_is_14() -> None:
-    """v14 = 发布读回核验状态（``sent_pending_verify``，#4 2026-10-18）。
+def test_schema_version_is_16() -> None:
+    """v16 = 关键词采纳账本（C 项自动回填的护栏与审计，2026-10-19）。
 
     ⚠️ **迁移版本号只能追加，不能改已应用的版本**
     —— 把新表塞进已应用过的 v4，既有库不会重跑它（本项目踩过这个坑）。
+    ⚠️ 且新版本必须是 MIGRATIONS 的**最后一块**：插在中间会让后面的版本
+    整段被跳过（2026-10-19 踩到 `no such table: trends_rounds`）。
     """
     from core import schema
 
-    assert schema.SCHEMA_VERSION == 15
+    assert schema.SCHEMA_VERSION == 16
     versions = [v for v, _ in schema.MIGRATIONS]
-    assert versions == list(range(1, 16)), "迁移版本必须连续"
+    assert versions == list(range(1, 17)), "迁移版本必须连续"
+    # ★ 顺序必须严格递增（把 v16 插到 v6 后面就违反这条，且后果是静默跳表）
+    assert versions == sorted(versions)

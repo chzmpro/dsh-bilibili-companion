@@ -199,6 +199,41 @@ async def run_cycle(
         with lock:
             run_id = db.start_run(trigger_source)
             result.run_id = run_id
+
+            # ★★ C 项（2026-10-19）：先跑一轮**推荐流抽词**，再发现。
+            #   放在最前面，是因为回填的关键词**本轮就该生效** ——
+            #   `prepare_batch` 读的是 config，回填后同轮搜索能用到新词。
+            #   仅在 auto_accept_suggestions=true 时才跑（默认关）；
+            #   无论开关如何，推荐流有自己的每日轮次上限（trends_rounds）。
+            trends_detail: dict[str, Any] = {}
+            trends_backfilled: list[str] = []
+            if bool(getattr(config.discovery, "auto_accept_suggestions", False)):
+                try:
+                    from core.trends_round import run_trends_round
+
+                    trends = await run_trends_round(
+                        runtime, auto_backfill=True, run_id=run_id
+                    )
+                    trends_detail = trends.to_dict()
+                    trends_backfilled = list(trends.backfilled)
+                    if trends_backfilled:
+                        # 回填改了 config.yaml → 重新读盘，让**本轮**的搜索用上新词。
+                        # 只换 runtime.config 不够：pipeline / worker 各自持有
+                        # 一份 config 引用，必须一起换，否则仍是旧关键词。
+                        with contextlib.suppress(Exception):
+                            from core.config import load_config
+
+                            config = load_config()
+                            runtime.config = config
+                            if getattr(runtime, "pipeline", None) is not None:
+                                runtime.pipeline.config = config
+                            if getattr(runtime, "worker", None) is not None:
+                                runtime.worker.config = config
+                except Exception as exc:  # noqa: BLE001 - 抽词失败不该挡住本轮
+                    trends_detail = {"ok": False, "detail": f"{type(exc).__name__}"}
+            else:
+                trends_detail = {"skipped": "auto_accept_suggestions=false"}
+
             try:
                 batch = await runtime.pipeline.prepare_batch()
             except RequestsBlocked as exc:
@@ -229,7 +264,10 @@ async def run_cycle(
                     read_n=len(batch.read_bvids),
                     errors_n=len(batch.failed),
                     conclusion="no_candidates",
-                    detail={"limitations": batch.limitations[:20]},
+                    detail={
+                        "limitations": batch.limitations[:20],
+                        "trends": trends_detail,
+                    },
                 )
                 result.conclusion = "no_candidates"
                 return result
@@ -344,6 +382,7 @@ async def run_cycle(
                     "turn": turn_detail,
                     "comments": comment_notes,
                     "chars": len(text),
+                    "trends": trends_detail,
                 },
             )
             return result

@@ -356,6 +356,76 @@ def suggestion_summary(db: Database) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# 关键词采纳账本（2026-10-19，C 项自动回填的护栏与审计）
+# ---------------------------------------------------------------------------
+
+
+def record_adoption(
+    db: Database,
+    *,
+    keyword: str,
+    run_id: str = "",
+    source: str = "rcmd",
+    state: str = "active",
+    note: str = "",
+) -> None:
+    """记一条"这个词被采纳 / 被跳过"（**不删历史**，同词覆盖状态）。"""
+    text = (keyword or "").strip()
+    if not text:
+        return
+    if state not in ("active", "skipped", "reverted"):
+        raise ValueError(f"非法采纳状态：{state}")
+    db.execute(
+        """
+        INSERT INTO keyword_adoptions (keyword, adopted_at, source, run_id, state, note)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(keyword) DO UPDATE SET
+            adopted_at = excluded.adopted_at,
+            source     = excluded.source,
+            run_id     = excluded.run_id,
+            state      = excluded.state,
+            note       = excluded.note
+        """,
+        (text, _now(), source, run_id, state, note[:200]),
+    )
+
+
+def active_adoptions(db: Database) -> list[str]:
+    """当前处于 ``active`` 的采纳词（供撤销与配额判断）。"""
+    rows = db.query(
+        "SELECT keyword FROM keyword_adoptions WHERE state = 'active' "
+        "ORDER BY adopted_at DESC"
+    )
+    return [str(row["keyword"]) for row in rows]
+
+
+def revert_adoption(db: Database, keyword: str) -> bool:
+    """把一条采纳标记为 ``reverted``（只改状态，**不删**，便于对照）。"""
+    text = (keyword or "").strip()
+    if not text:
+        return False
+    row = db.query_one("SELECT state FROM keyword_adoptions WHERE keyword = ?", (text,))
+    if row is None:
+        return False
+    db.execute(
+        "UPDATE keyword_adoptions SET state = 'reverted' WHERE keyword = ?", (text,)
+    )
+    return True
+
+
+def adoption_summary(db: Database) -> dict[str, int]:
+    """采纳账本概况（给 ``companion_status`` 用）。"""
+    out = {"active": 0, "skipped": 0, "reverted": 0}
+    for row in db.query(
+        "SELECT state, COUNT(*) AS n FROM keyword_adoptions GROUP BY state"
+    ):
+        state = str(row["state"])
+        if state in out:
+            out[state] = int(row["n"])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 轮次账本（**严格限额**的执行层）
 # ---------------------------------------------------------------------------
 

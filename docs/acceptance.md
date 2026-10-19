@@ -18,7 +18,7 @@
 
 | 验收维度 | 状态 |
 |---|---|
-| 代码 + 自动化测试（**1114 项**，2026-10-18） | ✅ **通过** |
+| 代码 + 自动化测试（**1124 项**，2026-10-19） | ✅ **通过** |
 | 静态检查（ruff + mypy strict，58 源文件） | ✅ **通过** |
 | MCP 服务端（真实 stdio 协议，25 工具） | ✅ **通过** |
 | 只读闭环（发现→证据→短包→日报） | ✅ **通过（mock 平台）** |
@@ -636,6 +636,16 @@ list_drafts: {"ok": true, "code": "OK", "data": {"drafts": [], "count": 0}, "mes
 | **R4 兴趣学习** | `feedback_signals` 聚合 UP/关键词；`build_focus` 注入；topic 下限 80 / 上限 35 | `core/storage.py`、`core/text_worker.py`；`tests/test_interest.py` |
 | **R5 内容学习** | 新增 `search_notes`（只读、短结果） | `tests/test_notes_search.py`、`tests/test_mcp_protocol.py`（26 工具） |
 | **R6 表达学习** | `cli.app learn-style` 从高分评论提炼表达技巧，写「表达风格（自动学习）」注记 | `core/style.py`；`tests/test_style.py` |
+
+### 6.7 2026-10-19 追加（C 项 + 私信接续）
+
+| 项 | 实现 | 证据 |
+|---|---|---|
+| **C 项·关键词自动回填** | 主人选择 `discovery.auto_accept_suggestions=true`：自动轮每轮**先**刷推荐流抽词并直接回填关键词（回填后重载 config，**同轮**搜索即用新词）；MCP 工具 `trends_suggest` 与自动轮共用 `core/trends_round.py` | `tests/test_trends_backfill.py`、`tests/test_cycle.py::test_cycle_runs_trends_backfill_before_discover` |
+| **回填护栏** | 每轮 ≤3 词；总数 ≤ `discovery.max_keywords`（默认 12）—— 每多一个词就多一路搜索请求；超限**停止回填并如实报告** `backfill_skipped`；推荐流每日 ≤2 轮（`trends_rounds`，**不写** `runs`） | `test_backfill_respects_total_keyword_cap`、`test_trends_round_uses_own_round_ledger` |
+| **采纳审计** | 新增 `keyword_adoptions` 账本（active/skipped/reverted，可撤销、不删历史）；`companion_status.trends.adoptions` 可见 | `tests/test_trends_backfill.py::test_g6_adoption_ledger_roundtrip` |
+| **豆包与 DSH 接续** | 修"消息和豆包接不上"：豆包**先**回占位再投递，投递文本带上 `dm_inbox.ack_text` 并要求"接着它说、不要重复、说错就纠正" | `tests/test_dm_watch.py::test_ack_happens_before_delivery_and_carries_text` |
+| **迁移顺序护栏** | 新版本**必须追加到 `MIGRATIONS` 末尾**：插在中间会让中间版本整段被跳过（2026-10-19 踩到 `no such table: trends_rounds`），现在 `migrate()` 会 loud 报错 | `core/storage.py::migrate`、`tests/test_preferences.py::test_schema_version_is_16` |
 
 ---
 

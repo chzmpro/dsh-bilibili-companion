@@ -4,7 +4,7 @@
 > 模型的行为约束（不是给人看的）见 [`AGENTS.md`](../AGENTS.md)；
 > 技术细节与验收证据见 [`README.md`](../README.md) 与 [`docs/acceptance.md`](acceptance.md)。
 >
-> 版本：2026-10-18 · 适用 schema v15 · MCP 工具 26 个
+> 版本：2026-10-19 · 适用 schema v16 · MCP 工具 26 个
 
 ---
 
@@ -308,7 +308,12 @@ DSH 启动
 ### 8.5 调整关键词 / 偏好
 
 - 关键词：`config.yaml` 的 `discovery.keywords`，或设置页；
-- 推荐流候选词：`cli.app keywords` 审阅后 `--accept`（**模型不能自己改关注词**）；
+- 推荐流候选词：`cli.app keywords` 审阅后 `--accept`（**默认**：模型不能自己改关注词）；
+- **C 项·自动回填（2026-10-19）**：`discovery.auto_accept_suggestions=true` 时，**自动轮**
+  每轮开跑前刷一次推荐流并**直接**把候选词写进 `discovery.keywords`。护栏：
+  每轮 ≤3 个词、总数 ≤ `discovery.max_keywords`（默认 12）、每次写入落
+  `keyword_adoptions` 账本（可审计/可撤销）、推荐流本身有每日轮次上限（2 轮）。
+  查看：`companion_status.trends.adoptions`；关掉：设置页里把该项改为关。
 - 偏好（只影响排序）：让 DSH 调 `owner_preferences`，或 `cli.app prefs`。
 
 ### 8.6 兴趣学习与表达学习
@@ -502,7 +507,7 @@ tar -czf "backup-$(date +%Y%m%d).tgz" "$DATA/companion.db" \
 与 `config.yaml` → 启动（schema 会自动迁移）。
 
 **schema 迁移**：每次升级自动执行，只能追加、不会改历史版本。
-2026-10-18 已到 **v15**（发布读回 + 豆包占位与 DSH 正式回复分离）。升级前**先备份**。
+2026-10-19 已到 **v16**（发布读回 + 豆包占位与 DSH 正式回复分离）。升级前**先备份**。
 
 ---
 
@@ -594,3 +599,4 @@ git pull origin main
 | 插件安装踩坑 | [`docs/plugin-plan.md`](plugin-plan.md) |
 | 私信监听面板 | [`docs/dm-watch-panel.md`](dm-watch-panel.md) |
 | 环境与许可边界 | [`docs/compatibility.md`](compatibility.md) |
+| 抖音/小红书能不能接（调研） | [`docs/platforms-douyin-xiaohongshu.md`](platforms-douyin-xiaohongshu.md) |

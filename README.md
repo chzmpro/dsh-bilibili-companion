@@ -644,7 +644,7 @@ interaction:
 export PYTHONIOENCODING=utf-8
 
 # 质量门（全绿才提交）
-./.venv/Scripts/python.exe -m pytest tests/          # 1114 passed, 1 skipped
+./.venv/Scripts/python.exe -m pytest tests/          # 1124 passed, 1 skipped
 ./.venv/Scripts/python.exe -m ruff check core bridge cli tests scripts/
 ./.venv/Scripts/python.exe -m mypy                   # strict, 58 files
 

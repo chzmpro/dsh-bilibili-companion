@@ -79,6 +79,16 @@ class DiscoveryConfig(_Base):
     #: 无论开关如何，**每日轮次上限与候选词数量上限始终生效**。
     auto_accept_suggestions: bool = False
 
+    #: ★ 关键词**总数上限**（2026-10-19 新增，配合自动回填）。
+    #:
+    #: 为什么必须有它：一旦 ``auto_accept_suggestions=true``，
+    #: 算法每次都能往 ``discovery.keywords`` 里加词；没有总数上限时，
+    #: 跑几十轮之后关键词会膨胀到上百个 —— 每轮搜索要按词逐个发请求，
+    #: 请求量与风控暴露面随词数线性上涨，而且画像会被稀释。
+    #:
+    #: 达到上限后**停止回填**（不删已有词），并在结果里如实报告跳过了几个。
+    max_keywords: int = Field(default=12, ge=1, le=50)
+
     @field_validator("keywords")
     @classmethod
     def _normalize_keywords(cls, value: list[str]) -> list[str]:

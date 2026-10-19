@@ -67,6 +67,12 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 
 > ★ **候选词只进池子，不改关键词**。`trends_suggest` 采纳与否由主人决定
 > （他跑 `cli.app keywords --accept <词>`）。你**不要**试图自己改关注点。
+>
+> ⚠️ **例外（2026-10-19 主人选择 C 项）**：若 `discovery.auto_accept_suggestions=true`，
+> **自动轮**（不是你这个对话）会在每轮开跑前刷一次推荐流并回填关键词。
+> 即便如此：① **你不用调** `trends_suggest` 去改词；② 回填有护栏
+> （每轮 ≤3 个、总数 ≤`discovery.max_keywords`、落 `keyword_adoptions` 账本）；
+> ③ 你想看采纳了什么，读 `companion_status.trends.adoptions`。
 
 **人做的事不在你的工具列表里**（`approve` / `resume` / 建收藏夹等）——
 需要它们时，请主人在终端跑 `./.venv/Scripts/python.exe -m cli.app ...`。
@@ -152,6 +158,7 @@ AI 身份：**被问到时可以说明**（不主动强调，也不假装是真�
 | 换对话/记忆/自动唤醒 | [`docs/dedicated-conversation.md`](docs/dedicated-conversation.md) |
 | 定时怎么接 | [`docs/schedule-wiring.md`](docs/schedule-wiring.md) |
 | 环境与许可边界 | [`docs/compatibility.md`](docs/compatibility.md) |
+| **抖音/小红书能不能接（调研）** | [`docs/platforms-douyin-xiaohongshu.md`](docs/platforms-douyin-xiaohongshu.md) |
 | **竞品精读与可学习点** | [`docs/competitor-review.md`](docs/competitor-review.md) |
 | **持续跑 + 设置页全量配置** | [`docs/continuous-and-settings.md`](docs/continuous-and-settings.md) |
 | **做视频（Multiplane）** | [`docs/multiplane-setup.md`](docs/multiplane-setup.md) |

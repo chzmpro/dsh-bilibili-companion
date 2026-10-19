@@ -30,8 +30,12 @@ discovery:
   # ★ 推荐流候选词**自动回填**关键词 —— 默认 false（要人审）。
   #   true = 候选词直接写进上面的 keywords，不用过目。
   #   ⚠️ 代价：推荐流是算法喂的，自动回填等于让**算法间接决定小号关注什么**。
-  #   无论开关如何，每日轮次上限（2）与单次条数上限（8）都始终生效。
+  #   护栏（2026-10-19 加）：每轮最多写 3 个、总数不超过 max_keywords、
+  #   每次写入落 keyword_adoptions 账本、推荐流本身有每日轮次上限。
   auto_accept_suggestions: false
+  # ★ 关键词总数上限（自动回填到这里就停）。
+  #   每多一个词就多一路搜索请求 ⇒ 请求量与风控暴露面线性上涨。
+  max_keywords: 12
 
 persona:
   # ★ 以下取自 curator 的 docs/13-agent-persona.md（21 题问卷定稿）

@@ -13,7 +13,7 @@
 
 ```
 视频入库 115 条 · 有证据 98 · 已打分 98 · 有提炼 37 · 合格(≥75) 37
-schema v15 · dm_inbox 待回复 0
+schema v16 · dm_inbox 待回复 0
 ```
 
 > ★ **2026-10-18 已完成 Codex 审查整改**（#2 字幕全量/分块、#3 整包预算、
@@ -26,6 +26,13 @@ schema v15 · dm_inbox 待回复 0
 > - R4：`feedback` 自动聚合 UP/关键词偏好，直接作用于 topic 分；
 > - R5：新增 `search_notes` 检索以前学过的笔记；
 > - R6：`cli.app learn-style` 从评论学表达技巧（人用触发）。
+>
+> ★★ **2026-10-19 追加**：
+> - **C 项已开启**：`discovery.auto_accept_suggestions=true` —— 自动轮每轮先刷推荐流
+>   抽词并**直接回填** `discovery.keywords`（护栏：每轮 ≤3 词 / 总数 ≤`max_keywords`(12)
+>   / 落 `keyword_adoptions` 账本 / 推荐流每日 ≤2 轮）；
+> - 豆包占位**改在投递之前**，投递文本带上 `ack_text`（修"消息和豆包接不上"）；
+> - schema v16（关键词采纳账本）；迁移加**顺序护栏**（新版本必须追加到末尾）。
 >
 > 生产闭环说明见 [`docs/production-loop-plan.md`](docs/production-loop-plan.md)。
 >

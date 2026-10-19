@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # 迁移按版本号递增；append-only，绝不修改已发布的迁移。
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -692,6 +692,40 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         """
         ALTER TABLE dm_inbox ADD COLUMN acked_at INTEGER;
         ALTER TABLE dm_inbox ADD COLUMN ack_text TEXT NOT NULL DEFAULT '';
+        """,
+    ),
+    # ------------------------------------------------------------------
+    # v16 —— 关键词**采纳账本**（2026-10-19，C 项自动回填的护栏与审计）
+    # ------------------------------------------------------------------
+    #
+    # ⚠️ 必须是**最后一块**（版本号最大的那个）：MIGRATIONS 是按顺序应用的，
+    #    把 v16 插在 v6 之后会让 v7..v15 **整段被跳过**
+    #    （2026-10-19 刚踩到：`no such table: trends_rounds`）。
+    #
+    # 背景：主人选择打开 discovery.auto_accept_suggestions=true，
+    # 也就是"推荐流抽出的词**直接**写进 config.yaml"。
+    #
+    # 只有"轮次上限"不够，还需要能回答三个问题：
+    #   ① 这个词什么时候、被哪一轮写进去的？
+    #   ② 一共加了多少个（防止无限膨胀，配合 discovery.max_keywords）？
+    #   ③ 主人之后想撤销，能查到是哪几个吗？
+    #
+    # state: active（当前生效）/ skipped（到上限没写）/ reverted（人工撤销）
+    # 不删历史 —— 撤销只改 state，便于日后对照。
+    (
+        16,
+        """
+        CREATE TABLE IF NOT EXISTS keyword_adoptions (
+            keyword     TEXT PRIMARY KEY,
+            adopted_at  INTEGER NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'rcmd',
+            run_id      TEXT NOT NULL DEFAULT '',
+            state       TEXT NOT NULL DEFAULT 'active',
+            note        TEXT NOT NULL DEFAULT '',
+            CHECK (state IN ('active','skipped','reverted'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_keyword_adoptions_state
+            ON keyword_adoptions(state, adopted_at DESC);
         """,
     ),
 )

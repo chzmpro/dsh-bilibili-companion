@@ -55,7 +55,11 @@ export const EDITABLE_KEYS = Object.freeze({
   },
   'discovery.auto_accept_suggestions': {
     type: 'bool',
-    note: '推荐流候选词自动回填关键词（默认关）',
+    note: '推荐流候选词自动回填关键词（默认关；开了算法会直接改你的关注词）',
+  },
+  'discovery.max_keywords': {
+    type: 'int',
+    note: '关键词总数上限（自动回填到这里就停，防止无限膨胀）',
   },
 
   // ---- 什么时候跑 --------------------------------------------------------

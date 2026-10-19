@@ -127,6 +127,15 @@ class Database:
         for version, script in schema.MIGRATIONS:
             if version <= current:
                 continue
+            if version != current + 1:
+                # ★ 顺序护栏（2026-10-19）：把新版本插在 MIGRATIONS 中间会
+                #   让"中间那段"整段被跳过（循环只把 current 推到已执行的版本）。
+                #   症状是**静默缺表**：`no such table: trends_rounds`。
+                #   宁可在迁移时 loud 报错，也不要让库悄悄缺表。
+                raise ValueError(
+                    f"迁移必须严格递增：当前 {current}，却要应用 {version}；"
+                    "新版本只能**追加到 MIGRATIONS 末尾**"
+                )
             with self.transaction() as tx:
                 tx.executescript(script)
                 tx.execute(

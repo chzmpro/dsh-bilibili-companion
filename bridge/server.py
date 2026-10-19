@@ -219,6 +219,12 @@ async def companion_status() -> dict[str, Any]:
         "trends": {
             "suggestions": _trends_summary(db),
             "rounds": _trends_rounds(db),
+            # ★ C 项（2026-10-19）：自动回填的采纳账本 + 相关开关现状
+            "adoptions": _trends_adoptions(db),
+            "auto_accept_suggestions": bool(
+                getattr(config.discovery, "auto_accept_suggestions", False)
+            ),
+            "max_keywords": int(getattr(config.discovery, "max_keywords", 12) or 12),
             "note": (
                 "候选词只进池子、**不自动改关键词**；采纳由主人跑 "
                 "cli.app keywords --accept。推荐流轮次有每日上限。"
@@ -783,115 +789,44 @@ async def trends_suggest_tool(
     limit: int | None = None,
     min_hits: int | None = None,
 ) -> dict[str, Any]:
-    from core.trends import (
-        DEFAULT_MAX_ITEMS,
-        RCMD_PATH,
-        RecommendationItem,
-        extract_candidates,
-        parse_feed,
-        quota_check,
-        record_round,
-        record_suggestions,
-        rounds_summary,
-    )
+    """把推荐流抽词交给 core.trends_round（自动轮与工具共用同一套逻辑）。"""
+    from core.trends_round import run_trends_round
 
     try:
         runtime = await get_runtime()
     except ConfigError as exc:
         return R.fail(R.NOT_CONFIGURED, str(exc))
 
-    # ★★ 严格限额（2026-10-17 补）：**跑之前**先查今天的轮次。
-    #    第一版只把上限写在文档里、代码从不检查 —— 那等于没有限额。
-    #    推荐流是算法喂的，跑得越多画像越被带跑，所以这道闸必须是真的。
-    allowed, reason = quota_check(runtime.db)
-    if not allowed:
-        return R.fail(R.RATE_LIMITED, reason, data={"trends": rounds_summary(runtime.db)})
+    result = await run_trends_round(runtime, limit=limit, min_hits=min_hits)
 
-    # ★ 限额：一次最多看 12 条（它只用来"发现新词"，不是刷视频）
-    cap = DEFAULT_MAX_ITEMS if limit is None else max(1, min(int(limit), 12))
-    hits_floor = 2 if min_hits is None else max(1, min(int(min_hits), 10))
+    if result.code == "RATE_LIMITED" and not result.ok:
+        return R.fail(R.RATE_LIMITED, result.detail, data={"trends": result.quota})
+    if result.code == "BLOCKED":
+        return R.fail(R.BLOCKED, result.detail)
+    if result.code == "PLATFORM_ERROR":
+        return R.fail(R.PLATFORM_ERROR, result.detail)
+    if result.code == "NO_CONTENT":
+        return R.ok({"fetched": 0, "suggestions": [], "note": result.detail})
 
-    params = {
-        "fresh_type": 3,
-        "ps": cap,
-        "fresh_idx": 1,
-        "fresh_idx_1h": 1,
-    }
-    try:
-        payload = await runtime.reader._get_signed(  # noqa: SLF001 —— 复用现成签名链路
-            f"https://api.bilibili.com{RCMD_PATH}",
-            params,
-            kind="metadata",
-            use_cache=False,
+    note = (
+        "候选词**只进了候选池，没有改动你的关键词**。"
+        "采纳方式（人用）：cli.app keywords --list 看过之后 --accept <词>。"
+        if not result.backfilled
+        else (
+            "⚠️ 已按 discovery.auto_accept_suggestions=true "
+            f"自动回填 {len(result.backfilled)} 个词。"
         )
-    except RequestsBlocked as exc:
-        # ★ 阻塞也记一轮：否则"每次都被拦"会变成无限重试（限额的意义正在于此）
-        record_round(runtime.db, conclusion="blocked")
-        return R.fail(R.BLOCKED, f"{exc.state}：{exc.human_action}")
-    except RateLimitExceeded as exc:
-        record_round(runtime.db, conclusion="rate_limited")
-        return R.fail(R.RATE_LIMITED, str(exc))
-    except BilibiliReadError as exc:
-        record_round(runtime.db, conclusion="error")
-        return R.fail(R.PLATFORM_ERROR, f"{exc.code}: {exc}")
-
-    items: list[RecommendationItem] = parse_feed(payload)
-    if not items:
-        # ★ 这里返回"没读到"是**诚实的**：接口通了但没内容（与"平台没接"不同）
-        record_round(runtime.db, conclusion="no_content")
-        return R.ok(
-            {
-                "fetched": 0,
-                "suggestions": [],
-                "note": "推荐流这次没返回内容（不是故障；也可能该接口对你这个账号不适用）。",
-            }
-        )
-
-    suggestions = extract_candidates(
-        items,
-        known_keywords=list(runtime.config.discovery.keywords),
-        limit=10,
-        min_hits=hits_floor,
     )
-    added = record_suggestions(runtime.db, suggestions, source="rcmd")
-
-    # ★ 自动回填（**默认关**）：开着时把候选词直接写进 config.yaml 的 keywords。
-    #   关着时只进池子，等主人 `cli.app keywords --accept`。
-    #   ⚠️ 无论开关如何，"每日轮次上限"与"候选词数量上限"都已经生效。
-    backfilled: list[str] = []
-    if getattr(runtime.config.discovery, "auto_accept_suggestions", False):
-        from core.yamlkeywords import add_keyword
-
-        for suggestion in suggestions:
-            ok, _ = add_keyword(suggestion.keyword)
-            if ok:
-                backfilled.append(suggestion.keyword)
-
-    record_round(
-        runtime.db,
-        fetched_n=len(items),
-        added_n=added,
-        conclusion="ok",
-    )
-
     return R.ok(
         {
-            "fetched": len(items),
-            "new_in_pool": added,
-            "suggestions": [s.to_dict() for s in suggestions],
-            "min_hits": hits_floor,
-            "quota": rounds_summary(runtime.db),
+            "fetched": result.fetched,
+            "new_in_pool": result.new_in_pool,
+            "suggestions": result.suggestions,
+            "min_hits": max(1, min(int(min_hits), 10)) if min_hits is not None else 2,
+            "quota": result.quota,
             # ★ 如实报告有没有自动回填（关着时是空列表）
-            "auto_backfilled": backfilled,
-            "note": (
-                "候选词**只进了候选池，没有改动你的关键词**。"
-                "采纳方式（人用）：cli.app keywords --list 看过之后 --accept <词>。"
-                if not backfilled
-                else (
-                    "⚠️ 已按 discovery.auto_accept_suggestions=true "
-                    f"自动回填 {len(backfilled)} 个词。"
-                )
-            ),
+            "auto_backfilled": result.backfilled,
+            "note": note,
         }
     )
 
@@ -1967,6 +1902,26 @@ def _trends_rounds(db: Any) -> dict[str, Any]:
             "remaining_today": 0,
             "error": type(exc).__name__,
         }
+
+
+def _trends_adoptions(db: Any) -> dict[str, Any]:
+    """已采纳的关键词概况（C 项自动回填的**可审计**面）。
+
+    计数都是 int；出错时额外带 ``_error``（字符串）说明原因，
+    所以返回类型是 ``dict[str, Any]`` 而不是 ``dict[str, int]``。
+    """
+    try:
+        from core.trends import adoption_summary
+
+        summary = adoption_summary(db)
+    except Exception as exc:  # noqa: BLE001 - 读不到不该让 status 整体失败
+        return {"active": 0, "skipped": 0, "reverted": 0, "error": 1, "_error": type(exc).__name__}
+    return {
+        "active": int(summary.get("active", 0)),
+        "skipped": int(summary.get("skipped", 0)),
+        "reverted": int(summary.get("reverted", 0)),
+        "error": 0,
+    }
 
 
 def _platform_summary() -> list[dict[str, Any]]:

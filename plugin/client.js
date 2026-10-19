@@ -140,6 +140,8 @@ window.__ModuleLoader__.load({
           // ★ 打分权重（2026-10-17 主人反馈"没什么用的给高分"之后加的）
           'discovery.score_topic_weight',
           'discovery.auto_accept_suggestions',
+          // ★ 2026-10-19（C 项）：自动回填的关键词总数上限
+          'discovery.max_keywords',
         ],
       },
       {

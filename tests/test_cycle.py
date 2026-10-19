@@ -180,6 +180,110 @@ async def test_cycle_dsh_timeout_marks_unverified(
     assert result.conclusion == "delivered_unverified"
 
 
+async def test_cycle_runs_trends_backfill_before_discover(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ C 项：开自动回填时，cycle 必须**先**跑推荐流抽词再去发现。
+
+    同一个 run 内，回填的关键词要能立刻被本轮搜索用上
+    （所以顺序是 trends → prepare_batch，而不是反过来）。
+    """
+    _seed(db)
+    order: list[str] = []
+
+    class TrackingPipeline(FakePipeline):
+        async def prepare_batch(self, **kwargs: Any) -> BatchResult:
+            order.append("prepare_batch")
+            return self.batch
+
+    runtime = FakeRuntime(
+        db,
+        _config(discovery={"keywords": ["DSH插件"], "auto_accept_suggestions": True}),
+        _batch(),
+    )
+    runtime.pipeline = TrackingPipeline(_batch())  # type: ignore[assignment]
+
+    async def fake_trends(runtime_arg: Any, **kwargs: Any) -> Any:
+        order.append("trends")
+        from core.trends_round import TrendsRoundResult
+
+        return TrendsRoundResult(
+            ok=True, code="OK", fetched=8, new_in_pool=2, backfilled=["新词A"], quota={}
+        )
+
+    async def fake_deliver(
+        text: str, *, session_id: str = "", timeout: float = 15
+    ) -> DeliverResult:
+        return DeliverResult(ok=True, delivered=True, session_id=session_id)
+
+    monkeypatch.setattr("core.trends_round.run_trends_round", fake_trends)
+    monkeypatch.setattr("core.cycle.deliver_async", fake_deliver)
+    monkeypatch.setattr("core.cycle._write_digest", lambda **kw: None)
+    polls = {"n": 0}
+
+    def fake_turn(session_id: str) -> TurnStatus:
+        polls["n"] += 1
+        # 第一次是"投递前"的基线（turns=3），之后出现新的 completed
+        return TurnStatus(
+            found=True,
+            turns=3 if polls["n"] == 1 else 4,
+            completed=polls["n"] > 1,
+            last_kind="completed",
+            error="",
+        )
+
+    monkeypatch.setattr("core.cycle.read_turn_status", fake_turn)
+
+    result = await run_cycle(
+        runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01
+    )
+    assert order == ["trends", "prepare_batch"], "必须先抽词再发现"
+    assert result.conclusion == "ok"
+    row = db.query_one("SELECT detail_json FROM runs WHERE run_id = ?", (result.run_id,))
+    assert row is not None and "新词A" in str(row["detail_json"])
+
+
+async def test_cycle_skips_trends_when_backfill_off(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认（关）时**不**跑推荐流，只记一条 skipped 说明。"""
+    _seed(db)
+    runtime = FakeRuntime(db, _config(), _batch())
+    calls: list[str] = []
+
+    async def fake_trends(runtime_arg: Any, **kwargs: Any) -> Any:
+        calls.append("trends")
+        raise AssertionError("关着时不该调用")
+
+    async def fake_deliver(
+        text: str, *, session_id: str = "", timeout: float = 15
+    ) -> DeliverResult:
+        return DeliverResult(ok=True, delivered=True, session_id=session_id)
+
+    monkeypatch.setattr("core.trends_round.run_trends_round", fake_trends)
+    monkeypatch.setattr("core.cycle.deliver_async", fake_deliver)
+    monkeypatch.setattr("core.cycle._write_digest", lambda **kw: None)
+    polls = {"n": 0}
+
+    def fake_turn2(session_id: str) -> TurnStatus:
+        polls["n"] += 1
+        return TurnStatus(
+            found=True,
+            turns=3 if polls["n"] == 1 else 4,
+            completed=polls["n"] > 1,
+            last_kind="completed",
+            error="",
+        )
+
+    monkeypatch.setattr("core.cycle.read_turn_status", fake_turn2)
+    result = await run_cycle(
+        runtime=runtime, session_id="s", wait_seconds=0.2, poll_seconds=0.01
+    )
+    assert calls == []
+    row = db.query_one("SELECT detail_json FROM runs WHERE run_id = ?", (result.run_id,))
+    assert row is not None and "auto_accept_suggestions=false" in str(row["detail_json"])
+
+
 async def test_cycle_unexpected_error_finishes_run(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
