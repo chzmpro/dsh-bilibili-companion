@@ -613,6 +613,9 @@ class DmWatcher:
             session_id=self._duty_session_id(),
             start_delay=self.cycle_start_delay,
             check_interval=self.cycle_interval,
+            # ★ 把调度判定也写进面板事件流（2026-10-19）：
+            #   否则"被峰时挡住"的那些 tick 完全静默，无法确认闸门在工作。
+            on_event=self.stats.add,
         )
         self._scheduler = scheduler
         self.stats.add("poll", "自动学习轮已启用（跟随 DSH 启停）")

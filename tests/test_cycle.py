@@ -341,6 +341,59 @@ async def test_scheduler_skips_paused_and_blocked(db: Database) -> None:
     assert (await blocked.tick_once())["ran"] is False
 
 
+async def test_scheduler_reports_skip_reason_to_event_sink(db: Database) -> None:
+    """★ 2026-10-19：被闸门挡住的 tick 必须**有迹可循**。
+
+    以前"峰时挡住"完全静默，只能靠"没有 run"间接推断 —— 主人要观察
+    峰谷是否真实生效时根本看不到。现在每次判定都进事件流，且**按变化去重**。
+    """
+    events: list[tuple[str, str]] = []
+    scheduler = CycleScheduler(
+        db=db,
+        config=_config(),
+        session_id="s",
+        cycle_runner=_Runner(db),
+        on_event=lambda kind, detail: events.append((kind, detail)),
+    )
+    run_id = db.start_run("host_start")
+    db.finish_run(run_id, conclusion="ok")  # 今天已完成 → 不该再跑
+
+    payload = await scheduler.tick_once()
+    assert payload["ran"] is False
+    assert events, "挡住的判定必须上报事件"
+    assert any("今天已完成过一轮" in detail for _kind, detail in events)
+
+    # 第 1 次已上报；其后每 10 次才再报一次（不每分钟刷屏，也不至于完全静默）
+    events.clear()
+    for _ in range(8):
+        await scheduler.tick_once()  # 计数 2..9，均不该上报
+    assert events == [], "重复理由不该每 tick 都上报"
+    await scheduler.tick_once()  # 计数 10 → 上报
+    assert events and "第 10 次" in events[0][1]
+
+    status = scheduler.status()
+    assert status["reason_repeats"] == 10
+    assert "今天已完成过一轮" in status["last_reason"]
+    assert status["last_ran_at"] == 0.0
+
+
+async def test_scheduler_due_run_emits_start_and_result(db: Database) -> None:
+    events: list[tuple[str, str]] = []
+    scheduler = CycleScheduler(
+        db=db,
+        config=_config(),
+        session_id="s",
+        cycle_runner=_Runner(db),
+        on_event=lambda kind, detail: events.append((kind, detail)),
+    )
+    payload = await scheduler.tick_once()
+    assert payload["ran"] is True
+    details = " | ".join(detail for _kind, detail in events)
+    assert "到期 → 开跑" in details
+    assert "本轮结束" in details
+    assert scheduler.status()["last_ran_at"] > 0
+
+
 async def test_scheduler_skips_unfinished_or_completed(db: Database) -> None:
     runner = _Runner()
     scheduler = CycleScheduler(db=db, config=_config(), session_id="s", cycle_runner=runner)

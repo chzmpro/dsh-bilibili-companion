@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 from http import HTTPStatus
@@ -318,6 +319,12 @@ def make_handler(service: _WatcherService, watcher: DmWatcher) -> type[BaseHTTPR
                 payload["running"] = service.running
                 payload["interval"] = watcher.interval
                 payload["auto_reply"] = watcher.auto_reply
+                # ★ 自动学习轮的判定状态（2026-10-19）：让"被峰时挡住"看得见
+                payload["auto_cycle"] = watcher.auto_cycle
+                scheduler = getattr(watcher, "_scheduler", None)
+                if scheduler is not None:
+                    with contextlib.suppress(Exception):
+                        payload["scheduler"] = scheduler.status()
                 if not service.running:
                     payload["uptime"] = "–"
                 self._json(payload)

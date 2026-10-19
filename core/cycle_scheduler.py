@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import datetime
 from typing import Any
@@ -52,6 +53,7 @@ class CycleScheduler:
         start_delay: float = DEFAULT_START_DELAY_SECONDS,
         check_interval: float = DEFAULT_CHECK_INTERVAL_SECONDS,
         cycle_runner: Any = None,
+        on_event: Any = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -59,7 +61,29 @@ class CycleScheduler:
         self.start_delay = max(0.0, float(start_delay))
         self.check_interval = max(5.0, float(check_interval))
         self._runner = cycle_runner
+        #: 事件回调（给面板/日志看）——`(kind, detail) -> None`
+        self._on_event = on_event
         self._stop = False
+        #: 同一条「不跑」的理由连续出现多少次（省日志）
+        self._last_reason = ""
+        self._reason_repeats = 0
+        #: 上一次真的跑了一轮的时刻（用于"距上次跑多久"）
+        self._last_ran_at = 0.0
+
+    def _emit(self, kind: str, detail: str) -> None:
+        if self._on_event is not None:
+            with contextlib.suppress(Exception):
+                self._on_event(kind, detail)
+
+    def status(self) -> dict[str, Any]:
+        """调度器自己的可观测状态（给面板/status 用）。"""
+        return {
+            "start_delay_seconds": self.start_delay,
+            "check_interval_seconds": self.check_interval,
+            "last_reason": self._last_reason,
+            "reason_repeats": self._reason_repeats,
+            "last_ran_at": self._last_ran_at,
+        }
 
     def stop(self) -> None:
         self._stop = True
@@ -105,28 +129,61 @@ class CycleScheduler:
             runs_today=self.db.runs_today(),
         )
 
+    def _note_skip(self, reason: str, *, key: str = "") -> dict[str, Any]:
+        """记一条「这轮不跑」的理由，并**按变化去重**后再上报事件。
+
+        ★ 为什么需要（2026-10-19 主人要观察"峰谷是否真实生效"）：
+        没有这条日志时，被峰时闸门挡住的那些 tick 是**完全静默**的 ——
+        只能靠"没有 run / 没有日报"间接推断，无法确认闸门真的在工作。
+
+        ★ ``key`` 是**去重键**：展示文本里会带上"下次几点"这种每秒都在变的
+        字段，若拿完整文本去重会永远"不重复" ⇒ 每个 tick 都刷一条。
+        """
+        dedup = key or reason
+        self._reason_repeats = (
+            self._reason_repeats + 1 if dedup == self._last_reason else 1
+        )
+        first = self._reason_repeats == 1
+        if first or self._reason_repeats % 10 == 0:
+            self._emit("scheduled", f"不跑：{reason}（第 {self._reason_repeats} 次）")
+        self._last_reason = dedup
+        return {"ran": False, "reason": reason}
+
     async def tick_once(self, *, now: datetime | None = None) -> dict[str, Any]:
         """检查一次；到期就跑一轮。返回结果（给日志/面板看）。"""
         if self._stop:
             return {"ran": False, "reason": "stopped"}
         if bool(getattr(self.config.interaction, "pause", False)):
-            return {"ran": False, "reason": "PAUSED"}
+            return self._note_skip("PAUSED（暂停中，恢复要人工做）")
         state = str(self.db.health_state())
         if state in health.BLOCKING_STATES:
-            return {"ran": False, "reason": f"HEALTH_BLOCKED:{state}"}
+            return self._note_skip(f"HEALTH_BLOCKED:{state}（平台阻断，需人工恢复）")
         unfinished = self._unfinished_run()
         if unfinished:
-            return {"ran": False, "reason": f"UNFINISHED_RUN:{unfinished}"}
+            return self._note_skip(f"UNFINISHED_RUN:{unfinished}（上一轮还没结束）")
 
         check = self._due(now=now)
         if not check.due:
-            return {"ran": False, "reason": check.reason, "next_run_at": check.next_run_at}
+            return self._note_skip(
+                f"{check.reason}｜下次 {check.next_run_at}",
+                # ★ 去重键用**稳定**部分，不含 next_run_at（否则每秒都"变了"）
+                key=check.reason,
+            )
 
+        # 真的要跑了：把"为什么现在跑"也记下来（含模式与触发来源）
         trigger = "host_start" if self.config.schedule.mode == "on_host_start" else "schedule"
+        self._emit(
+            "scheduled",
+            f"到期 → 开跑（mode={self.config.schedule.mode}，trigger={trigger}）：{check.reason}",
+        )
+        self._last_reason = ""
+        self._reason_repeats = 0
         result = await self._run_cycle(trigger)
+        self._last_ran_at = time.time()
         payload = result.to_dict() if hasattr(result, "to_dict") else {"result": str(result)}
         payload["ran"] = True
         payload["trigger_source"] = trigger
+        self._emit("scheduled", f"本轮结束：conclusion={payload.get('conclusion')}")
         return payload
 
     async def run(self) -> None:
